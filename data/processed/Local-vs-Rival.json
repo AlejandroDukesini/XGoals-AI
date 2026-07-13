@@ -1,0 +1,102 @@
+{
+  "home_report": {
+    "team": "Local",
+    "record": "5-0-0",
+    "ppg": 3.0,
+    "xg_for": 2.61,
+    "style": "Mixto / pragmático",
+    "press": "Bloque medio / presión selectiva"
+  },
+  "away_report": {
+    "team": "Rival",
+    "record": "4-1-0",
+    "ppg": 2.6,
+    "xg_for": 3.41,
+    "style": "Juego directo / transiciones rápidas",
+    "press": "Bloque medio / presión selectiva"
+  },
+  "dofa": {
+    "matchup": "Local vs Rival",
+    "Fortalezas": [
+      {
+        "dimension": "Ataque Local vs Defensa Rival",
+        "mensaje": "Local genera 2.61 xG/pp frente a 1.2 goles concedidos/pp de Rival.",
+        "edge": 0.37
+      },
+      {
+        "dimension": "Ataque Rival vs Defensa Local",
+        "mensaje": "Rival genera 3.41 xG/pp frente a 1.4 concedidos/pp de Local.",
+        "edge": 0.42
+      }
+    ],
+    "Debilidades": [
+      {
+        "dimension": "Espalda de la defensa Local",
+        "mensaje": "Local juega con línea alta (72.7) y Rival es directo: riesgo de contraataques a la espalda.",
+        "severidad": 0.47
+      }
+    ],
+    "Oportunidades": [],
+    "Amenazas": [
+      {
+        "dimension": "Replanteo táctico (Local)",
+        "mensaje": "Local rotó 3 esquemas en 5 pp: alta probabilidad de ajustar el sistema en función de Rival.",
+        "severidad": 0.6
+      },
+      {
+        "dimension": "Riesgo físico (Local)",
+        "mensaje": "Jugadores con carga alta en Local: Local J7, Local J10. Posible caída en el tramo final."
+      },
+      {
+        "dimension": "Riesgo físico (Rival)",
+        "mensaje": "Jugadores con carga alta en Rival: Rival J1, Rival J2, Rival J6. Posible caída en el tramo final."
+      }
+    ],
+    "lambda_adjust": {
+      "home": 1.056,
+      "away": 1.169
+    }
+  },
+  "prediction": {
+    "home": 0.398,
+    "draw": 0.224,
+    "away": 0.378,
+    "over_2_5": 0.743,
+    "under_2_5": 0.257,
+    "btts_yes": 0.74,
+    "btts_no": 0.26,
+    "score": "1-1"
+  },
+  "value_bets": [
+    {
+      "market": "Over 2.5",
+      "model_prob": 0.743,
+      "book_odds": 1.73,
+      "implied_prob": 0.578,
+      "edge": 0.165,
+      "ev": 0.286,
+      "kelly_stake": 0.098,
+      "is_value": true
+    },
+    {
+      "market": "2 (Visita)",
+      "model_prob": 0.378,
+      "book_odds": 3.1,
+      "implied_prob": 0.323,
+      "edge": 0.055,
+      "ev": 0.171,
+      "kelly_stake": 0.0204,
+      "is_value": true
+    },
+    {
+      "market": "BTTS Sí",
+      "model_prob": 0.74,
+      "book_odds": 1.58,
+      "implied_prob": 0.633,
+      "edge": 0.107,
+      "ev": 0.169,
+      "kelly_stake": 0.0728,
+      "is_value": true
+    }
+  ]
+}
