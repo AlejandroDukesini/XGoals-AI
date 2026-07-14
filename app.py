@@ -1,32 +1,36 @@
 """
-app.py  —  APEXPREDICT IA · Inteligencia Deportiva
-==================================================
-Aplicación de análisis deportivo predictivo y de apuestas, nivel producción,
-construida con Streamlit + Pandas + NumPy + SciPy (scipy.stats.poisson).
+app.py  —  APEXPREDICT MULTI-ENGINE & TRACKER IA
+================================================
+Aplicación web de nivel producción para análisis deportivo predictivo, comparación
+de cuotas multi-casa, optimización de stake (Kelly) y seguimiento financiero
+personal. Streamlit + Pandas + NumPy + SciPy (scipy.stats.poisson).
 
 Ejecutar:
-    pip install streamlit pandas numpy scipy
+    pip install streamlit==1.40.0 pandas numpy scipy
     streamlit run app.py
     # (si 'streamlit' no está en el PATH:  python -m streamlit run app.py)
 
-Filosofía de diseño (rigor y veracidad, cero aleatoriedad):
-  · La base de datos histórica es fija y auditable (fila por fila, 10 partidos).
-  · El modelo de goles es Poisson bivariado con scipy.stats.poisson.pmf.
-  · Las cuotas de la casa se derivan del CONSENSO (muestra completa de 10 pp).
-    El analista modela sobre la ventana de N partidos que elija en el slider;
-    cuando su muestra diverge del consenso, aparece el Valor Esperado (EV>0).
-    Todo es determinista: mismos inputs -> mismos números, siempre.
+Dos pantallas (navegación por st.session_state):
+    A) Panel de Análisis Predictivo  — inferencia, datos, auditoría, apuestas.
+    B) Historial & Tracker de Apuestas — bet tracker manual con ROI/Yield.
+
+Diseño (cero aleatoriedad, todo determinista y reproducible):
+    · Catálogo multi-torneo; histórico de 10 pp generado por oscilaciones
+      trigonométricas ancladas a un seed del nombre del equipo.
+    · Poisson bivariado (scipy.stats.poisson.pmf) ajustado por competitividad.
+    · 4 casas (BetPlay, Wplay, Rushbet, Codere) con dispersión determinista.
+    · Stake óptimo por Criterio de Kelly simplificado.
 
 Estructura:
-    1. CONFIG & TEMA (CSS Navy)
-    2. DATOS (histórico fila por fila, jugadores, banca simulada)
-    3. BACKEND (Poisson, mercados, DOFA, EV, combinadas, consistencia)
-    4. UI (header/KPIs, sidebar, 3 pestañas, sección de apuestas)
+    1. CONFIG & TEMA (CSS azul profundo)
+    2. CATÁLOGO + generador determinista
+    3. BACKEND (Poisson, DOFA, xG, log, casas, Kelly, tracker)
+    4. UI (sidebar, header, pantalla A con pestañas, pantalla B tracker)
     5. main()
 """
 from __future__ import annotations
 
-import itertools
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -39,560 +43,376 @@ from scipy.stats import poisson
 # 1. CONFIGURACIÓN DE PÁGINA Y TEMA
 # ══════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="ApexPredict IA · Inteligencia Deportiva",
-    page_icon="🎯",
+    page_title="ApexPredict Multi-Engine & Tracker IA",
+    page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-ANALYST_NAME = "Santiago"      # analista (dashboard personal)
-INITIAL_BANKROLL = 10_000      # unidades de banca
+ANALYST_NAME = "Santiago"
 
-# Paleta Dark Blue / Navy
 C = {
-    "bg": "#0a1524", "bg2": "#0d1b2a", "card": "#152238", "card2": "#1b2b47",
-    "line": "rgba(96,165,250,0.14)", "primary": "#0077b6", "accent": "#00b4d8",
-    "cyan": "#38e0e0", "text": "#e8eef7", "muted": "#8ea3bf",
-    "green": "#20c997", "red": "#ef476f", "amber": "#ffd166",
+    "bg": "#050c1a", "bg2": "#0d1b2a", "card": "#1b263b", "card2": "#22304a",
+    "line": "rgba(0,180,216,0.16)", "primary": "#0077b6", "accent": "#00b4d8",
+    "neon": "#39ff14", "coral": "#ff4d4d", "text": "#e8eef7", "muted": "#8ea3bf",
+    "amber": "#ffd166",
 }
 
 
 def inject_css() -> None:
-    """Inyecta el CSS del tema premium azul oscuro."""
+    """CSS del entorno premium: azul profundo, cian, verde neón / rojo coral."""
     st.markdown(f"""
     <style>
       .stApp {{
-        background:
-          radial-gradient(1100px 500px at 12% -8%, #16294a 0%, {C['bg']} 55%),
-          {C['bg']};
+        background: radial-gradient(1200px 560px at 12% -10%, #0f2544 0%, {C['bg']} 58%), {C['bg']};
         color: {C['text']};
       }}
-      #MainMenu, footer, header[data-testid="stHeader"] {{ visibility: hidden; }}
-      .block-container {{ padding-top: 1.4rem; }}
+      #MainMenu, footer, header[data-testid="stHeader"] {{ visibility:hidden; }}
+      .block-container {{ padding-top:1.2rem; }}
 
-      /* Sidebar */
       section[data-testid="stSidebar"] > div {{
-        background: linear-gradient(180deg, {C['card']} 0%, #0c1930 100%);
+        background: linear-gradient(180deg, {C['card']} 0%, #08111f 100%);
         border-right: 1px solid {C['line']};
       }}
-      section[data-testid="stSidebar"] * {{ color: {C['text']}; }}
+      section[data-testid="stSidebar"] * {{ color:{C['text']}; }}
+      .stExpander {{ border:1px solid {C['line']} !important; border-radius:12px !important;
+        background:{C['bg2']} !important; }}
 
-      /* Tipografía */
       h1,h2,h3,h4 {{ color:{C['text']}; font-weight:800; letter-spacing:-.3px; }}
 
-      /* Header / logo */
-      .brand {{
-        display:flex; align-items:center; gap:.7rem; margin-bottom:.15rem;
-      }}
-      .brand .mark {{
-        font-size:1.9rem; filter: drop-shadow(0 0 10px rgba(0,180,216,.6));
-      }}
-      .brand .name {{
-        font-size:1.75rem; font-weight:900; letter-spacing:.5px;
-        background:linear-gradient(90deg,{C['cyan']},{C['primary']});
-        -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-      }}
-      .brand .tag {{ color:{C['muted']}; font-weight:600; font-size:.95rem; }}
-      .welcome {{ color:{C['muted']}; font-size:.9rem; margin:.1rem 0 1rem; }}
+      .brand {{ display:flex; align-items:center; gap:.7rem; margin-bottom:.1rem; }}
+      .brand .mark {{ font-size:2rem; filter:drop-shadow(0 0 12px rgba(0,180,216,.7)); }}
+      .brand .name {{ font-size:1.7rem; font-weight:900; letter-spacing:.5px;
+        background:linear-gradient(90deg,{C['accent']},{C['primary']});
+        -webkit-background-clip:text; -webkit-text-fill-color:transparent; }}
+      .brand .tag {{ color:{C['muted']}; font-weight:700; font-size:.9rem; }}
+      .welcome {{ color:{C['muted']}; font-size:.9rem; margin:.15rem 0 1rem; }}
       .welcome b {{ color:{C['accent']}; }}
 
-      /* KPI cards */
-      .kpi {{
-        background:linear-gradient(160deg,{C['card2']},{C['card']});
+      .kpi {{ background:linear-gradient(160deg,{C['card2']},{C['card']});
         border:1px solid {C['line']}; border-radius:16px; padding:.85rem 1rem;
-        box-shadow:0 10px 26px rgba(0,0,0,.35); position:relative; overflow:hidden;
-      }}
-      .kpi::before {{
-        content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
-        background:linear-gradient(180deg,{C['cyan']},{C['primary']});
-      }}
-      .kpi .lbl {{ font-size:.68rem; letter-spacing:1.3px; color:{C['muted']};
-        text-transform:uppercase; }}
-      .kpi .val {{ font-size:1.55rem; font-weight:900; margin-top:.15rem; }}
+        box-shadow:0 10px 26px rgba(0,0,0,.4); position:relative; overflow:hidden; }}
+      .kpi::before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:4px;
+        background:linear-gradient(180deg,{C['accent']},{C['primary']}); }}
+      .kpi .lbl {{ font-size:.66rem; letter-spacing:1.2px; color:{C['muted']}; text-transform:uppercase; }}
+      .kpi .val {{ font-size:1.45rem; font-weight:900; margin-top:.12rem; }}
       .kpi .sub {{ font-size:.72rem; color:{C['muted']}; }}
-      .up {{ color:{C['green']}; }} .down {{ color:{C['red']}; }}
+      .neon {{ color:{C['neon']}; text-shadow:0 0 10px rgba(57,255,20,.55); }}
+      .coral {{ color:{C['coral']}; text-shadow:0 0 10px rgba(255,77,77,.45); }}
 
-      /* Tarjetas */
-      .card {{
-        background:{C['card']}; border:1px solid {C['line']}; border-radius:16px;
-        padding:1.1rem 1.3rem; margin-bottom:1rem; box-shadow:0 8px 22px rgba(0,0,0,.3);
-      }}
+      .card {{ background:{C['card']}; border:1px solid {C['line']}; border-radius:16px;
+        padding:1.05rem 1.25rem; margin-bottom:1rem; box-shadow:0 8px 22px rgba(0,0,0,.35); }}
       .card h4 {{ margin-top:0; color:{C['accent']}; }}
 
-      /* Chips DOFA */
       .chip {{ display:inline-block; padding:.18rem .7rem; border-radius:999px;
         font-size:.72rem; font-weight:800; letter-spacing:.5px; margin-bottom:.5rem; }}
-      .cf {{ background:rgba(32,201,151,.15); color:{C['green']}; }}
-      .cd {{ background:rgba(239,71,111,.15); color:{C['red']}; }}
+      .cf {{ background:rgba(57,255,20,.15); color:{C['neon']}; }}
+      .cd {{ background:rgba(255,77,77,.15); color:{C['coral']}; }}
       .co {{ background:rgba(0,180,216,.16); color:{C['accent']}; }}
       .ca {{ background:rgba(255,209,102,.15); color:{C['amber']}; }}
 
-      /* Barra 1X2 */
       .bar {{ background:rgba(255,255,255,.05); border-radius:9px; height:30px;
         display:flex; overflow:hidden; border:1px solid {C['line']}; }}
       .seg {{ display:flex; align-items:center; justify-content:center;
-        font-size:.8rem; font-weight:800; color:#08111f; }}
+        font-size:.8rem; font-weight:800; color:#06101f; }}
 
-      /* Botones */
-      .stButton > button {{
-        background:linear-gradient(90deg,{C['primary']},{C['accent']});
-        color:#fff; border:none; border-radius:12px; padding:.62rem 1rem;
-        font-weight:800; width:100%; box-shadow:0 6px 18px rgba(0,119,182,.45);
-        transition:all .15s ease;
-      }}
-      .stButton > button:hover {{ transform:translateY(-2px);
-        box-shadow:0 8px 24px rgba(0,180,216,.6); }}
+      .stButton > button {{ background:linear-gradient(90deg,{C['primary']},{C['accent']});
+        color:#fff; border:none; border-radius:12px; padding:.55rem 1rem; font-weight:800;
+        width:100%; box-shadow:0 6px 18px rgba(0,119,182,.45); transition:all .15s ease; }}
+      .stButton > button:hover {{ transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,180,216,.6); }}
+      .stForm .stButton > button {{ background:linear-gradient(90deg,#0a9,{C['neon']}); color:#06101f; }}
 
-      /* Tabs */
-      .stTabs [data-baseweb="tab-list"] {{ gap:.4rem; }}
-      .stTabs [data-baseweb="tab"] {{
-        background:{C['card']}; border:1px solid {C['line']}; border-radius:10px;
-        padding:.5rem 1rem; color:{C['muted']}; font-weight:700;
-      }}
+      .stTabs [data-baseweb="tab"] {{ background:{C['card']}; border:1px solid {C['line']};
+        border-radius:10px; padding:.5rem 1rem; color:{C['muted']}; font-weight:700; }}
       .stTabs [aria-selected="true"] {{
         background:linear-gradient(90deg,{C['primary']},{C['accent']}) !important;
-        color:#fff !important; border-color:transparent !important;
-      }}
+        color:#fff !important; border-color:transparent !important; }}
 
-      /* Radio como pills */
-      div[role="radiogroup"] {{ gap:.5rem; }}
-      div[role="radiogroup"] label {{
-        background:{C['card']}; border:1px solid {C['line']}; border-radius:10px;
-        padding:.45rem .9rem; }}
-
-      .stDataFrame {{ border-radius:12px; overflow:hidden; }}
-      .value-pos {{ color:{C['green']}; font-weight:800; }}
+      .best {{ background:linear-gradient(90deg, rgba(57,255,20,.18), rgba(0,180,216,.12));
+        border:1px solid rgba(57,255,20,.4); border-radius:12px; padding:.9rem 1.1rem; }}
       .muted {{ color:{C['muted']}; font-size:.82rem; }}
     </style>
     """, unsafe_allow_html=True)
 
 
+# Monedas soportadas (adapta símbolos y rangos de banca).
+CURRENCIES = {
+    "COP": dict(sym="COP$", default=1_000_000, min=100_000, max=20_000_000, step=50_000),
+    "USD": dict(sym="$",    default=10_000,    min=1_000,   max=200_000,    step=500),
+}
+
+
+def money(v: float, cur: str) -> str:
+    """Formatea un monto con el símbolo de la moneda seleccionada."""
+    return f"{CURRENCIES[cur]['sym']}{v:,.0f}"
+
+
 # ══════════════════════════════════════════════════════════════════════════
-# 2. DATOS — histórico FIJO fila por fila (últimos 10 partidos oficiales)
+# 2. CATÁLOGO MULTI-TORNEO + GENERADOR DETERMINISTA
 # ══════════════════════════════════════════════════════════════════════════
-# Orden cronológico: índice 0 = más antiguo, índice 9 = más reciente.
-# El slider "últimos N" toma la cola (tail) del DataFrame.
-# Campos por partido:
-#   gf  goles a favor      ga  goles en contra    pos  posesión %
-#   sot tiros al arco      sotc tiros concedidos   fouls faltas
-#   pas efectividad pases  form formación del DT   rival oponente
-MODALITIES: Dict[str, float] = {
-    "Amistoso": 1.18,
-    "Copa": 1.02,
-    "Eliminatorias": 0.95,
-    "Mundial": 0.88,
+CATALOG: Dict[str, Dict] = {
+    "Mundial 2026": {"comp": 0.92, "teams": {
+        "Colombia":  dict(badge="🇨🇴", conf="CONMEBOL", atk=1.7, dfn=0.9, pos=55, sot=5.2, pas=.85, style="4-2-3-1", star="J. Rodríguez"),
+        "Argentina": dict(badge="🇦🇷", conf="CONMEBOL", atk=2.3, dfn=0.7, pos=58, sot=6.5, pas=.88, style="4-3-3",   star="L. Messi"),
+        "Francia":   dict(badge="🇫🇷", conf="UEFA",     atk=2.2, dfn=0.8, pos=56, sot=6.2, pas=.87, style="4-2-3-1", star="K. Mbappé"),
+        "España":    dict(badge="🇪🇸", conf="UEFA",     atk=2.1, dfn=0.9, pos=64, sot=6.0, pas=.90, style="4-3-3",   star="Pedri"),
+        "Marruecos": dict(badge="🇲🇦", conf="CAF",      atk=1.4, dfn=0.9, pos=50, sot=4.5, pas=.83, style="4-3-3",   star="A. Hakimi"),
+        "Japón":     dict(badge="🇯🇵", conf="AFC",      atk=1.6, dfn=1.0, pos=54, sot=4.8, pas=.86, style="4-2-3-1", star="T. Kubo"),
+        "USA":       dict(badge="🇺🇸", conf="CONCACAF", atk=1.5, dfn=1.1, pos=52, sot=4.6, pas=.84, style="4-3-3",   star="C. Pulisic"),
+    }},
+    "Liga BetPlay": {"comp": 1.05, "teams": {
+        "Millonarios":       dict(badge="🔵", atk=1.6, dfn=1.0, pos=55, sot=5.0, pas=.83, style="4-2-3-1", star="R. Vargas"),
+        "Atlético Nacional": dict(badge="🟢", atk=1.8, dfn=0.9, pos=57, sot=5.4, pas=.84, style="4-3-3",   star="E. Palacios"),
+        "Junior":            dict(badge="🔴", atk=1.5, dfn=1.1, pos=53, sot=4.8, pas=.82, style="4-4-2",   star="C. Bacca"),
+        "Santa Fe":          dict(badge="⚪", atk=1.4, dfn=1.1, pos=52, sot=4.6, pas=.81, style="4-4-2",   star="H. Rodallega"),
+    }},
+    "Champions League": {"comp": 0.98, "teams": {
+        "Real Madrid":     dict(badge="⚪", atk=2.4, dfn=0.9, pos=58, sot=6.6, pas=.88, style="4-3-3",   star="J. Bellingham"),
+        "Manchester City": dict(badge="🔷", atk=2.6, dfn=0.8, pos=66, sot=7.2, pas=.91, style="4-3-3",   star="E. Haaland"),
+        "PSG":             dict(badge="🔵", atk=2.3, dfn=1.0, pos=60, sot=6.4, pas=.88, style="4-3-3",   star="Dembélé"),
+        "Bayern Múnich":   dict(badge="🔴", atk=2.5, dfn=1.0, pos=62, sot=6.8, pas=.89, style="4-2-3-1", star="H. Kane"),
+    }},
+    "MLS / Otros": {"comp": 1.12, "teams": {
+        "Inter de Miami": dict(badge="🩷", atk=2.0, dfn=1.2, pos=57, sot=5.6, pas=.85, style="4-4-2", star="L. Messi"),
+        "Al-Nassr":       dict(badge="🟡", atk=2.1, dfn=1.1, pos=58, sot=5.8, pas=.85, style="4-3-3", star="C. Ronaldo"),
+        "LAFC":           dict(badge="⚫", atk=1.8, dfn=1.1, pos=54, sot=5.2, pas=.83, style="4-3-3", star="O. Bouanga"),
+        "LA Galaxy":      dict(badge="⭐", atk=1.7, dfn=1.2, pos=53, sot=5.0, pas=.82, style="4-4-2", star="R. Puig"),
+    }},
 }
 
-# Cada tupla-columna tiene longitud 10. rivales genéricos para el histórico.
-_RIVALS = ["Perú", "Chile", "Ecuador", "Bolivia", "Paraguay",
-           "Venezuela", "Uruguay", "Brasil", "Argentina", "Colombia"]
+ALL_TEAMS: Dict[str, Dict] = {}
+for _tour, _data in CATALOG.items():
+    for _tname, _prof in _data["teams"].items():
+        _p = dict(_prof); _p["tournament"] = _tour; _p["comp"] = _data["comp"]
+        ALL_TEAMS[_tname] = _p
 
-TEAM_DB: Dict[str, Dict] = {
-    "Colombia": dict(
-        flag="🇨🇴",
-        gf=[2, 1, 3, 1, 2, 0, 2, 1, 2, 2],
-        ga=[0, 1, 1, 0, 1, 1, 0, 2, 1, 0],
-        pos=[58, 55, 61, 54, 60, 49, 57, 52, 59, 56],
-        sot=[6, 4, 7, 5, 6, 3, 6, 4, 7, 6],
-        sotc=[3, 5, 2, 4, 3, 6, 3, 5, 2, 3],
-        fouls=[12, 14, 10, 13, 11, 16, 12, 15, 11, 12],
-        pas=[.87, .84, .89, .83, .88, .79, .86, .82, .88, .87],
-        form=["4-2-3-1", "4-2-3-1", "4-3-3", "4-2-3-1", "4-3-3",
-              "4-4-2", "4-2-3-1", "4-2-3-1", "4-3-3", "4-2-3-1"],
-    ),
-    "Argentina": dict(
-        flag="🇦🇷",
-        gf=[2, 3, 2, 4, 1, 3, 2, 3, 2, 3],
-        ga=[0, 1, 0, 1, 1, 0, 1, 0, 1, 0],
-        pos=[60, 58, 62, 59, 57, 61, 58, 63, 60, 59],
-        sot=[7, 6, 8, 7, 5, 7, 6, 8, 7, 6],
-        sotc=[2, 3, 2, 3, 4, 2, 3, 2, 3, 2],
-        fouls=[11, 12, 10, 13, 12, 11, 12, 10, 13, 11],
-        pas=[.88, .86, .90, .87, .85, .89, .86, .90, .88, .87],
-        form=["4-3-3", "4-3-3", "4-4-2", "4-3-3", "4-3-3",
-              "4-3-3", "4-4-2", "4-3-3", "4-3-3", "4-3-3"],
-    ),
-    "Brasil": dict(
-        flag="🇧🇷",
-        gf=[3, 2, 3, 1, 4, 2, 3, 2, 3, 2],
-        ga=[1, 1, 2, 1, 1, 0, 2, 1, 1, 2],
-        pos=[62, 60, 64, 58, 63, 61, 60, 65, 62, 60],
-        sot=[8, 6, 7, 5, 8, 6, 7, 6, 8, 6],
-        sotc=[4, 3, 4, 3, 3, 2, 4, 3, 4, 3],
-        fouls=[10, 12, 11, 13, 10, 12, 11, 10, 12, 11],
-        pas=[.89, .87, .88, .85, .90, .87, .86, .90, .88, .87],
-        form=["4-2-3-1", "4-3-3", "4-2-3-1", "4-4-2", "4-3-3",
-              "4-2-3-1", "4-3-3", "4-2-3-1", "4-3-3", "4-2-3-1"],
-    ),
-    "Uruguay": dict(
-        flag="🇺🇾",
-        gf=[1, 2, 1, 1, 2, 0, 2, 1, 1, 2],
-        ga=[1, 1, 0, 2, 1, 1, 0, 2, 1, 1],
-        pos=[48, 46, 50, 45, 49, 44, 47, 43, 48, 46],
-        sot=[4, 5, 4, 3, 5, 3, 5, 4, 4, 5],
-        sotc=[5, 4, 5, 6, 4, 6, 4, 5, 5, 4],
-        fouls=[15, 16, 14, 17, 15, 18, 14, 16, 15, 16],
-        pas=[.80, .79, .82, .78, .81, .77, .80, .79, .81, .80],
-        form=["4-4-2", "3-5-2", "4-4-2", "5-3-2", "4-4-2",
-              "3-5-2", "4-4-2", "5-3-2", "4-4-2", "3-5-2"],
-    ),
-}
-
-# Jugadores clave: ratings (0-10) y km recorridos por partido (10 registros).
-# La desviación estándar de estas series mide consistencia técnica y física.
-PLAYERS_DB: Dict[str, List[Dict]] = {
-    "Colombia": [
-        dict(name="J. Rodríguez", pos="MED",
-             rating=[7.2, 6.8, 7.9, 7.0, 7.5, 6.5, 7.3, 6.9, 7.6, 7.4],
-             km=[9.8, 9.5, 10.1, 9.6, 9.9, 9.2, 9.7, 9.4, 10.0, 9.8]),
-        dict(name="L. Díaz", pos="DEL",
-             rating=[7.5, 7.0, 8.1, 7.2, 7.8, 6.8, 7.6, 7.1, 7.9, 7.7],
-             km=[10.5, 10.2, 10.8, 10.3, 10.6, 9.9, 10.4, 10.1, 10.7, 10.5]),
-        dict(name="D. Sánchez", pos="DEF",
-             rating=[6.9, 7.1, 7.0, 7.3, 6.8, 7.2, 6.9, 7.4, 7.0, 7.1],
-             km=[9.0, 9.2, 8.9, 9.3, 9.1, 9.4, 9.0, 9.5, 9.1, 9.2]),
-    ],
-    "Argentina": [
-        dict(name="L. Messi", pos="DEL",
-             rating=[8.4, 8.0, 8.7, 8.9, 7.6, 8.5, 8.1, 8.8, 8.2, 8.6],
-             km=[8.8, 8.5, 9.0, 8.7, 8.3, 8.9, 8.6, 9.1, 8.7, 8.9]),
-        dict(name="R. De Paul", pos="MED",
-             rating=[7.4, 7.2, 7.5, 7.3, 7.1, 7.6, 7.2, 7.7, 7.3, 7.5],
-             km=[11.2, 11.0, 11.4, 11.1, 10.8, 11.3, 11.0, 11.5, 11.1, 11.3]),
-        dict(name="N. Otamendi", pos="DEF",
-             rating=[7.0, 7.2, 6.8, 7.3, 7.1, 7.4, 6.9, 7.2, 7.0, 7.3],
-             km=[9.3, 9.4, 9.1, 9.5, 9.2, 9.6, 9.0, 9.4, 9.2, 9.5]),
-    ],
-    "Brasil": [
-        dict(name="Vinícius Jr.", pos="DEL",
-             rating=[8.1, 7.4, 8.3, 6.9, 8.6, 7.7, 8.0, 7.5, 8.4, 7.8],
-             km=[10.2, 9.8, 10.4, 9.5, 10.6, 9.9, 10.1, 9.7, 10.5, 10.0]),
-        dict(name="Neymar", pos="MED",
-             rating=[7.8, 8.2, 7.0, 8.4, 7.6, 8.0, 7.3, 8.5, 7.7, 8.1],
-             km=[9.5, 9.8, 9.0, 10.0, 9.4, 9.7, 9.1, 10.1, 9.5, 9.8]),
-        dict(name="Marquinhos", pos="DEF",
-             rating=[7.3, 7.1, 7.4, 7.0, 7.5, 7.6, 7.0, 7.4, 7.2, 7.3],
-             km=[9.1, 9.0, 9.2, 8.9, 9.3, 9.4, 8.8, 9.2, 9.0, 9.1]),
-    ],
-    "Uruguay": [
-        dict(name="D. Núñez", pos="DEL",
-             rating=[7.6, 6.5, 7.8, 6.2, 7.9, 6.0, 7.5, 6.4, 7.7, 6.8],
-             km=[10.8, 10.3, 11.0, 10.1, 11.1, 9.8, 10.6, 10.2, 10.9, 10.4]),
-        dict(name="F. Valverde", pos="MED",
-             rating=[7.7, 7.5, 7.9, 7.4, 7.8, 7.6, 7.5, 7.9, 7.6, 7.8],
-             km=[11.5, 11.3, 11.7, 11.2, 11.6, 11.4, 11.2, 11.8, 11.4, 11.6]),
-        dict(name="R. Araújo", pos="DEF",
-             rating=[7.2, 7.4, 7.0, 7.5, 7.1, 7.3, 6.9, 7.4, 7.2, 7.3],
-             km=[9.4, 9.5, 9.2, 9.6, 9.3, 9.5, 9.1, 9.5, 9.3, 9.4]),
-    ],
-}
-
-# Banca simulada (determinista) para las KPI cards del dashboard personal.
-# (stake, cuota, ganada?)  -> se derivan bankroll, ROI, yield y aciertos.
-# Calibrada a un yield ~6% (perfil de apostador profesional, creíble y sobrio).
-LEDGER: List[Tuple[float, float, bool]] = [
-    (100, 2.10, True),  (100, 1.90, False), (100, 1.95, True),  (100, 2.00, False),
-    (100, 2.30, True),  (100, 1.85, False), (100, 1.85, True),  (100, 2.10, False),
-    (100, 2.05, True),  (100, 1.95, False), (100, 1.75, True),  (100, 1.80, False),
-    (100, 2.50, True),  (100, 2.00, False), (100, 1.90, True),  (100, 2.20, False),
-    (100, 2.15, True),  (100, 1.90, False), (100, 1.80, True),  (100, 2.05, False),
-    (100, 2.00, True),
-]
-
-# Base de goles de la liga: promedio combinado de goles a FAVOR y en CONTRA de
-# toda la base histórica (baseline de goles por equipo/partido). Combinar ambos
-# evita sesgar λ hacia abajo cuando la muestra son selecciones fuertes.
-LEAGUE_AVG = float(np.mean(
-    [g for t in TEAM_DB.values() for g in t["gf"]] +
-    [g for t in TEAM_DB.values() for g in t["ga"]]
-))
-HOME_ADV = 1.10
-MAX_G = 5  # matriz de 0-0 a 5-5
-
-# --- Modelo de xG y trazabilidad de origen (pestaña de auditoría) ---
-# xG estimado por partido a partir de los tiros al arco. Factor = conversión
-# media histórica de un remate a puerta en gol (~0.31 en fútbol de selecciones).
 XG_PER_SOT = 0.31
-SCRAPE_DATE = pd.Timestamp("2026-07-12 03:15")   # corrida nocturna del scraper
-SCRAPE_SOURCES = {                               # fuente rotada por jornada
-    0: ("ESPN", "https://www.espn.com/soccer/match/_/gameId/{gid}"),
-    1: ("Win Sports", "https://www.winsports.co/partido/{gid}"),
-}
+HOME_ADV = 1.10
+MAX_G = 5
+SCRAPE_DATE = pd.Timestamp("2026-07-12 03:15")
+BOOKIES = ["BetPlay", "Wplay", "Rushbet", "Codere"]
+HOUSE_MARGIN = {"BetPlay": 0.040, "Wplay": 0.045, "Rushbet": 0.050, "Codere": 0.038}
+RISK_KELLY = {"Conservador": 0.25, "Moderado": 0.50, "Agresivo": 1.00}
+_ALT_FORM = {"4-3-3": "4-2-3-1", "4-2-3-1": "4-3-3", "4-4-2": "4-3-3", "3-5-2": "4-4-2"}
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 3. BACKEND DE CIENCIA DE DATOS
-# ══════════════════════════════════════════════════════════════════════════
+def _seed(name: str) -> int:
+    return sum(ord(c) for c in name)
+
+
+_HIST_CACHE: Dict[str, pd.DataFrame] = {}
+
+
 def team_history(team: str) -> pd.DataFrame:
-    """Devuelve el histórico completo (10 partidos) de un equipo como DataFrame."""
-    d = TEAM_DB[team]
-    df = pd.DataFrame({
-        "Jornada": [f"J-{10 - i}" for i in range(10)],
-        "Rival": _RIVALS,
-        "GF": d["gf"], "GC": d["ga"], "Posesión %": d["pos"],
-        "Tiros arco": d["sot"], "Tiros concedidos": d["sotc"],
-        "Faltas": d["fouls"],
-        "Pases %": [round(p * 100, 1) for p in d["pas"]],
-        # xG estimado = tiros al arco × conversión media (modelo de la app).
-        "xG": [round(s * XG_PER_SOT, 2) for s in d["sot"]],
-        "Formación DT": d["form"],
-    })
+    """Histórico de 10 partidos GENERADO de forma determinista desde el perfil."""
+    if team in _HIST_CACHE:
+        return _HIST_CACHE[team]
+    p = ALL_TEAMS[team]
+    seed = _seed(team)
+    opponents = [t for t in ALL_TEAMS
+                 if ALL_TEAMS[t]["tournament"] == p["tournament"] and t != team] or ["Rival"]
+    rows = []
+    for i in range(10):
+        s1 = math.sin(seed * 0.13 + i * 0.9)
+        s2 = math.cos(seed * 0.17 + i * 0.7)
+        s3 = math.sin(seed * 0.07 + i * 1.3)
+        gf = max(0, round(p["atk"] + 0.75 * s1))
+        ga = max(0, round(p["dfn"] + 0.60 * s2))
+        pos = int(min(72, max(35, round(p["pos"] + 6 * s3))))
+        sot = max(1, round(p["sot"] + 1.3 * s1))
+        sotc = max(1, round(2 + p["dfn"] * 2.2 + 1.3 * s2))
+        fouls = max(5, round(12 + 3 * s3 + (2 if p["pos"] < 52 else 0)))
+        pas = round(min(0.95, max(0.70, p["pas"] + 0.04 * s1)), 3)
+        form = p["style"] if (i % 4) else _ALT_FORM.get(p["style"], p["style"])
+        rows.append({
+            "Jornada": f"J-{10 - i}", "Rival": opponents[i % len(opponents)],
+            "GF": gf, "GC": ga, "Posesión %": pos, "Tiros arco": sot,
+            "Tiros concedidos": sotc, "Faltas": fouls,
+            "Pases %": round(pas * 100, 1), "xG": round(sot * XG_PER_SOT, 2),
+            "Formación DT": form,
+        })
+    df = pd.DataFrame(rows)
+    _HIST_CACHE[team] = df
     return df
 
 
 def last_n(team: str, n: int) -> pd.DataFrame:
-    """Filtra dinámicamente los últimos N partidos (cola del histórico)."""
     return team_history(team).tail(n).reset_index(drop=True)
 
 
-def extraction_log(team: str, n: int) -> pd.DataFrame:
-    """
-    Log de extracción (scraping) simulado y DETERMINISTA de los últimos N
-    partidos: fecha del partido, fuente, URL y sello de tiempo del raspado.
-    Da trazabilidad de origen para la auditoría de veracidad.
-    """
-    d = TEAM_DB[team]
-    rows = []
-    df_n = last_n(team, n)
-    for pos_i, row in df_n.iterrows():
-        # Índice global 0..9 (0 = más antiguo). Reconstruye desde 'Jornada'.
-        j = 10 - int(row["Jornada"].split("-")[1])          # J-10 -> 0 ... J-1 -> 9
-        match_date = SCRAPE_DATE.normalize() - pd.Timedelta(days=(10 - j) * 7)
-        gid = 6_400_000 + hash((team, j)) % 90_000           # id de partido estable
-        src_name, src_tpl = SCRAPE_SOURCES[j % 2]
-        # Sello de extracción: cada request separado unos segundos (cortesía).
-        stamp = SCRAPE_DATE + pd.Timedelta(seconds=j * 7)
-        rows.append({
-            "Partido": f"{team} vs {row['Rival']}",
-            "Fecha partido": match_date.strftime("%Y-%m-%d"),
-            "Fuente": src_name,
-            "URL de origen": src_tpl.format(gid=gid),
-            "Extraído": stamp.strftime("%Y-%m-%d %H:%M:%S"),
-            "Estado": "✅ 200 OK",
-        })
-    return pd.DataFrame(rows)
-
-
 def team_averages(team: str, n: int) -> Dict[str, float]:
-    """Promedios de la muestra seleccionada + formación (estilo) modal del DT."""
     df = last_n(team, n)
     return {
-        "gf": df["GF"].mean(), "ga": df["GC"].mean(),
-        "pos": df["Posesión %"].mean(), "sot": df["Tiros arco"].mean(),
-        "sotc": df["Tiros concedidos"].mean(), "fouls": df["Faltas"].mean(),
-        "pas": df["Pases %"].mean(),
+        "gf": df["GF"].mean(), "ga": df["GC"].mean(), "pos": df["Posesión %"].mean(),
+        "sot": df["Tiros arco"].mean(), "sotc": df["Tiros concedidos"].mean(),
+        "fouls": df["Faltas"].mean(), "pas": df["Pases %"].mean(),
         "form": df["Formación DT"].mode().iloc[0],
     }
 
 
+def _league_avg() -> float:
+    vals = []
+    for t in ALL_TEAMS:
+        h = team_history(t)
+        vals += h["GF"].tolist() + h["GC"].tolist()
+    return float(np.mean(vals))
+
+
+LEAGUE_AVG = _league_avg()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3. BACKEND
+# ══════════════════════════════════════════════════════════════════════════
 @dataclass
 class Prediction:
     lam_home: float
     lam_away: float
-    matrix: np.ndarray                 # 6x6 normalizada (0..5 x 0..5)
-    markets: Dict[str, float]          # todas las probabilidades de mercado
+    matrix: np.ndarray
+    markets: Dict[str, float]
     top_scores: List[Tuple[str, float]]
 
 
-def compute_prediction(home: str, away: str, modality: str, n: int) -> Prediction:
-    """
-    Modelo de Poisson bivariado sobre la muestra de N partidos.
-
-        atk = goles promedio anotados      def = goles promedio concedidos
-        λ_home = atk_home · def_away / LEAGUE_AVG · ventaja_local · factor_modalidad
-        λ_away = atk_away · def_home / LEAGUE_AVG · factor_modalidad
-        P(i,j) = poisson.pmf(i; λ_home) · poisson.pmf(j; λ_away)   (matriz 0..5)
-    """
+def compute_prediction(home: str, away: str, n: int, comp: float) -> Prediction:
+    """Poisson bivariado ajustado por competitividad (`comp`) de la liga."""
     h, a = team_averages(home, n), team_averages(away, n)
-    m = MODALITIES[modality]
-
-    lam_h = max(0.15, h["gf"] * a["ga"] / LEAGUE_AVG * HOME_ADV * m)
-    lam_a = max(0.15, a["gf"] * h["ga"] / LEAGUE_AVG * m)
-
+    lam_h = max(0.15, h["gf"] * a["ga"] / LEAGUE_AVG * HOME_ADV * comp)
+    lam_a = max(0.15, a["gf"] * h["ga"] / LEAGUE_AVG * comp)
     k = np.arange(MAX_G + 1)
-    ph = poisson.pmf(k, lam_h)
-    pa = poisson.pmf(k, lam_a)
-    M = np.outer(ph, pa)
-    M = M / M.sum()                    # normaliza (la malla 0..5 trunca la cola)
-
-    idx = np.add.outer(k, k)           # i + j (total de goles) por celda
+    M = np.outer(poisson.pmf(k, lam_h), poisson.pmf(k, lam_a))
+    M = M / M.sum()
+    idx = np.add.outer(k, k)
     mk = {
-        "1": float(np.tril(M, -1).sum()),          # gana local (i>j)
-        "X": float(np.trace(M)),                   # empate (i==j)
-        "2": float(np.triu(M, 1).sum()),           # gana visita (j>i)
-        "Over 1.5": float(M[idx >= 2].sum()),
-        "Under 1.5": float(M[idx <= 1].sum()),
-        "Over 2.5": float(M[idx >= 3].sum()),
-        "Under 2.5": float(M[idx <= 2].sum()),
-        "Over 3.5": float(M[idx >= 4].sum()),
-        "Under 3.5": float(M[idx <= 3].sum()),
+        "1": float(np.tril(M, -1).sum()), "X": float(np.trace(M)), "2": float(np.triu(M, 1).sum()),
+        "Over 1.5": float(M[idx >= 2].sum()), "Under 1.5": float(M[idx <= 1].sum()),
+        "Over 2.5": float(M[idx >= 3].sum()), "Under 2.5": float(M[idx <= 2].sum()),
+        "Over 3.5": float(M[idx >= 4].sum()), "Under 3.5": float(M[idx <= 3].sum()),
         "BTTS Sí": float(M[1:, 1:].sum()),
-        "BTTS No": float(1 - M[1:, 1:].sum()),
     }
-    mk["1X"] = mk["1"] + mk["X"]
-    mk["X2"] = mk["X"] + mk["2"]
-    mk["12"] = mk["1"] + mk["2"]
-
-    flat = sorted(((f"{i}-{j}", float(M[i, j]))
-                   for i in k for j in k), key=lambda t: -t[1])[:6]
-
+    mk["BTTS No"] = 1 - mk["BTTS Sí"]
+    mk["1X"] = mk["1"] + mk["X"]; mk["X2"] = mk["X"] + mk["2"]; mk["12"] = mk["1"] + mk["2"]
+    flat = sorted(((f"{i}-{j}", float(M[i, j])) for i in k for j in k), key=lambda t: -t[1])[:6]
     return Prediction(round(lam_h, 3), round(lam_a, 3), M, mk, flat)
 
 
 def build_dofa(home: str, away: str, n: int, pred: Prediction) -> Dict[str, List[str]]:
-    """Matriz DOFA cruzada, algorítmica, a partir de los promedios de la muestra."""
     h, a = team_averages(home, n), team_averages(away, n)
-    hf, af = TEAM_DB[home]["flag"], TEAM_DB[away]["flag"]
+    hs, as_ = ALL_TEAMS[home], ALL_TEAMS[away]
     F, D, O, A = [], [], [], []
-
     if h["gf"] > a["ga"] + 0.3:
-        F.append(f"Ataque de {home} ({h['gf']:.1f} goles/pp) supera la defensa de "
-                 f"{away} ({a['ga']:.1f} recibidos/pp).")
+        F.append(f"Ataque de {home} ({h['gf']:.1f} goles/pp) supera la defensa de {away} ({a['ga']:.1f} recibidos/pp).")
     if h["pos"] > a["pos"] + 3:
-        F.append(f"{home} domina la posesión ({h['pos']:.0f}% vs {a['pos']:.0f}%): "
-                 f"impone ritmo y control.")
-    if h["sot"] > a["sotc"]:
-        F.append(f"Genera más tiros al arco ({h['sot']:.1f}) que los que suele "
-                 f"conceder {away} ({a['sotc']:.1f}): volumen ofensivo favorable.")
-
+        F.append(f"{home} domina la posesión ({h['pos']:.0f}% vs {a['pos']:.0f}%): impone ritmo.")
+    if a["fouls"] > 13 and hs.get("star"):
+        F.append(f"{away} comete muchas faltas ({a['fouls']:.1f}/pp): balón parado ideal para {hs['star']} y {home}.")
     if a["gf"] > h["ga"] + 0.3:
-        D.append(f"Ataque de {away} ({a['gf']:.1f} goles/pp) penetra la defensa de "
-                 f"{home} ({h['ga']:.1f} recibidos/pp).")
+        D.append(f"Ataque de {away} ({a['gf']:.1f} goles/pp) penetra la defensa de {home} ({h['ga']:.1f} recibidos/pp).")
     if h["pas"] < a["pas"]:
-        D.append(f"Menor precisión de pase ({h['pas']:.0f}% vs {a['pas']:.0f}%): "
-                 f"riesgo de pérdidas ante la presión rival.")
+        D.append(f"Menor precisión de pase ({h['pas']:.0f}% vs {a['pas']:.0f}%): riesgo de pérdidas bajo presión.")
     if h["fouls"] > a["fouls"] + 1.5:
-        D.append(f"{home} comete más faltas ({h['fouls']:.1f}): expone su zona a "
-                 f"balón parado.")
-
+        D.append(f"{home} comete más faltas ({h['fouls']:.1f}/pp): expone su área a balón parado de {as_.get('star', away)}.")
     if pred.markets["Over 2.5"] > 0.55:
-        O.append(f"Escenario de partido abierto: {pred.markets['Over 2.5']:.0%} de "
-                 f"probabilidad de Over 2.5.")
+        O.append(f"Partido abierto: {pred.markets['Over 2.5']:.0%} de probabilidad de Over 2.5.")
     if pred.markets["1"] > pred.markets["2"] + 0.12:
-        O.append(f"Localía y nivel inclinan el favoritismo a {home} "
-                 f"({pred.markets['1']:.0%}).")
-    if pred.markets["BTTS No"] > 0.55:
-        O.append("Perfil de partido controlado: alta probabilidad de que un equipo "
-                 "mantenga su portería a cero.")
-
-    A.append(f"Sistema del DT rival: «{a['form']}» — preparar respuesta táctica.")
-    if a["gf"] >= 2.3:
-        A.append(f"{away} es prolífico ({a['gf']:.1f} goles/pp): máxima atención a "
-                 f"las transiciones.")
+        O.append(f"Localía y nivel inclinan el favoritismo a {home} ({pred.markets['1']:.0%}).")
+    A.append(f"Sistema del DT rival: «{a['form']}» — figura a vigilar: {as_.get('star', 'su referente')}.")
+    if a["gf"] >= 2.2:
+        A.append(f"{away} es prolífico ({a['gf']:.1f} goles/pp): atención a las transiciones.")
     if pred.markets["2"] > 0.30:
-        A.append(f"{away} conserva {pred.markets['2']:.0%} de opciones de victoria: "
-                 f"margen estrecho, no confiarse.")
-
+        A.append(f"{away} conserva {pred.markets['2']:.0%} de opciones: margen estrecho.")
     return {"Fortalezas": F, "Debilidades": D, "Oportunidades": O, "Amenazas": A}
 
 
-def _fair_odds(p: float, overround: float = 1.07) -> float:
-    """Cuota de la casa a partir de una probabilidad, con margen (overround)."""
-    p = min(max(p, 0.02), 0.98)
-    return round(1.0 / (p * overround), 2)
-
-
-def build_singles(model: Prediction, consensus: Prediction) -> pd.DataFrame:
-    """
-    Mercados sencillos: la casa fija cuotas sobre el CONSENSO (10 pp);
-    el analista usa el MODELO (muestra N). EV = prob_IA · cuota − 1.
-    """
-    keys = ["1", "X", "2", "Over 2.5", "Under 2.5", "BTTS Sí", "BTTS No"]
-    labels = {"1": "1 · Gana Local", "X": "X · Empate", "2": "2 · Gana Visita",
-              "Over 2.5": "Más de 2.5 goles", "Under 2.5": "Menos de 2.5 goles",
-              "BTTS Sí": "Ambos anotan · Sí", "BTTS No": "Ambos anotan · No"}
+def extraction_log(team: str, n: int, source: str, custom_url: str) -> pd.DataFrame:
+    base = {"ESPN Scraper": "https://www.espn.com/soccer/match/_/gameId/{gid}",
+            "Win Sports Analytica": "https://www.winsports.co/partido/{gid}"}
     rows = []
-    for kk in keys:
-        p_ia = model.markets[kk]
-        odds = _fair_odds(consensus.markets[kk])   # cuota BetPlay (consenso)
-        ev = p_ia * odds - 1
+    for _, row in last_n(team, n).iterrows():
+        j = 10 - int(row["Jornada"].split("-")[1])
+        gid = 6_400_000 + (_seed(team) * 31 + j * 7) % 90_000
+        if source == "Custom URL" and custom_url.strip():
+            url = f"{custom_url.rstrip('/')}?match={team.lower().replace(' ', '-')}-{gid}"
+            src_name = "Custom URL"
+        else:
+            url = base.get(source, base["ESPN Scraper"]).format(gid=gid)
+            src_name = source
+        match_date = SCRAPE_DATE.normalize() - pd.Timedelta(days=(10 - j) * 7)
+        stamp = SCRAPE_DATE + pd.Timedelta(seconds=j * 7)
         rows.append({
-            "Mercado": labels[kk],
-            "Prob. IA": p_ia,
-            "Cuota (casa)": odds,
-            "Prob. casa": round(1 / odds, 3),
-            "EV": round(ev, 3),
-            "Valor": "🟢 VALOR" if ev > 0 else "—",
+            "Partido": f"{team} vs {row['Rival']}", "Fecha partido": match_date.strftime("%Y-%m-%d"),
+            "Fuente": src_name, "URL de origen": url,
+            "Extraído": stamp.strftime("%Y-%m-%d %H:%M:%S"), "Estado": "✅ 200 OK",
         })
     return pd.DataFrame(rows)
 
 
-def build_combos(home: str, away: str, model: Prediction,
-                 consensus: Prediction) -> List[Dict]:
-    """
-    Plantillas de combinadas lógicas: une eventos de alta probabilidad.
-    Cuota final = producto de cuotas (consenso). Fiabilidad = producto de prob. IA.
-    """
-    m, c = model.markets, consensus.markets
-    fav_home = m["1"] >= m["2"]
-    dc_key = "1X" if fav_home else "X2"
-    dc_lbl = f"Doble oportunidad {'1X' if fav_home else 'X2'} " \
-             f"({home if fav_home else away} gana o empata)"
-
-    templates = [
-        {"nombre": f"{dc_lbl}  +  Menos de 3.5 goles",
-         "legs": [(dc_key, dc_lbl), ("Under 3.5", "Menos de 3.5 goles")]},
-        {"nombre": f"{'Gana ' + (home if fav_home else away)}  +  Más de 1.5 goles",
-         "legs": [("1" if fav_home else "2",
-                   f"Gana {home if fav_home else away}"),
-                  ("Over 1.5", "Más de 1.5 goles")]},
-        {"nombre": "Ambos anotan · No  +  Menos de 3.5 goles",
-         "legs": [("BTTS No", "Ambos anotan No"), ("Under 3.5", "Menos de 3.5")]},
-    ]
-
-    out = []
-    for t in templates:
-        odds = float(np.prod([_fair_odds(c[k]) for k, _ in t["legs"]]))
-        reliab = float(np.prod([m[k] for k, _ in t["legs"]]))
-        risk = ("🟢 Bajo" if reliab > 0.45 else
-                "🟡 Medio" if reliab > 0.30 else "🔴 Alto")
-        out.append({
-            "Combinada": t["nombre"],
-            "Patas": len(t["legs"]),
-            "Cuota final": round(odds, 2),
-            "Fiabilidad IA": round(reliab, 3),
-            "Riesgo": risk,
-        })
-    out.sort(key=lambda d: -d["Fiabilidad IA"])
-    return out
-
-
-def player_consistency(team: str, n: int) -> pd.DataFrame:
-    """
-    Consistencia por jugador sobre la muestra N:
-      · Rating medio y su desviación estándar (consistencia TÉCNICA).
-      · Km medios y su desviación estándar (consistencia FÍSICA).
-    Menor desviación => mayor consistencia. Se resume en un índice 0-100.
-    """
-    rows = []
-    for p in PLAYERS_DB[team]:
-        r = np.array(p["rating"][-n:], dtype=float)
-        km = np.array(p["km"][-n:], dtype=float)
-        r_std, km_std = float(r.std(ddof=0)), float(km.std(ddof=0))
-        rows.append({
-            "Jugador": p["name"], "Pos": p["pos"],
-            "Rating medio": round(r.mean(), 2),
-            "σ Rating": round(r_std, 3),
-            "Consist. técnica": round(100 / (1 + r_std), 1),
-            "Km medio": round(km.mean(), 2),
-            "σ Km": round(km_std, 3),
-            "Consist. física": round(100 / (1 + km_std), 1),
-        })
-    return pd.DataFrame(rows)
-
-
-def bankroll_kpis() -> Dict[str, float]:
-    """Deriva bankroll, ROI, yield y aciertos de la banca simulada (LEDGER)."""
-    staked = sum(s for s, _, _ in LEDGER)
-    profit = sum((s * (o - 1) if w else -s) for s, o, w in LEDGER)
-    wins = sum(1 for _, _, w in LEDGER if w)
+# ---- Comparador multi-casa + Kelly --------------------------------------- #
+# Mercados ofrecidos en el comparador: etiqueta -> (clave interna, referencia).
+def market_options(home: str, away: str) -> Dict[str, Tuple[str, str]]:
     return {
-        "bankroll": INITIAL_BANKROLL + profit,
-        "profit": profit,
-        "roi": profit / staked * 100,
-        "yield": profit / staked * 100,
-        "hit_rate": wins / len(LEDGER) * 100,
-        "n_bets": len(LEDGER),
+        f"Victoria {home}": ("1", home),
+        "Empate": ("X", "el empate"),
+        f"Victoria {away}": ("2", away),
+        "Más de 2.5 goles": ("Over 2.5", "Over 2.5"),
+        "Menos de 2.5 goles": ("Under 2.5", "Under 2.5"),
+        "Ambos Anotan · Sí": ("BTTS Sí", "Ambos Anotan"),
+        "Ambos Anotan · No": ("BTTS No", "No Ambos Anotan"),
+    }
+
+
+def bookmaker_table(prob_ia: float, cons_p: float, home: str, away: str,
+                    market_key: str) -> pd.DataFrame:
+    """
+    Cuotas de 4 casas para un mercado. Cada casa cotiza sobre el consenso con su
+    margen de casa y una dispersión determinista (sin aleatoriedad). El EV se
+    calcula contra la probabilidad del MODELO (prob_ia).
+    """
+    fair_cons = 1.0 / min(max(cons_p, 0.02), 0.98)      # base de la casa (consenso)
+    rows = []
+    for casa in BOOKIES:
+        wob = 0.06 * math.sin(_seed(casa + market_key + home + away) * 0.1)
+        odds = round(max(1.01, fair_cons * (1 - HOUSE_MARGIN[casa] + wob)), 2)
+        ev = prob_ia * odds - 1
+        rows.append({"Casa": casa, "Cuota": odds, "Prob. implícita": round(1 / odds, 3),
+                     "EV": round(ev, 3)})
+    return pd.DataFrame(rows)
+
+
+def kelly_amount(ev: float, odds: float, bankroll: float, risk: str) -> float:
+    """
+    Criterio de Kelly simplificado:
+        Monto = Bankroll · (EV / (Cuota − 1)) · Factor de Perfil de Riesgo
+    Solo con ventaja (EV>0); si no, no se apuesta.
+    """
+    if ev <= 0 or odds <= 1:
+        return 0.0
+    fraction = (ev / (odds - 1)) * RISK_KELLY[risk]
+    return max(0.0, bankroll * fraction)
+
+
+# ---- Tracker ------------------------------------------------------------- #
+def bet_net(estado: str, inversion: float, cuota: float) -> float:
+    """Utilidad neta de una apuesta según su estado."""
+    if estado == "Ganada":
+        return inversion * (cuota - 1)
+    if estado == "Perdida":
+        return -inversion
+    return 0.0                                          # Pendiente / Anulada
+
+
+def tracker_kpis(bets: List[Dict]) -> Dict[str, float]:
+    """Balance neto, ROI y Yield del historial de apuestas del usuario."""
+    settled = [b for b in bets if b["Estado"] in ("Ganada", "Perdida")]
+    staked = sum(b["Inversión"] for b in settled)
+    profit = sum(bet_net(b["Estado"], b["Inversión"], b["Cuota"]) for b in settled)
+    wins = sum(1 for b in settled if b["Estado"] == "Ganada")
+    return {
+        "profit": profit, "staked": staked,
+        "roi": (profit / staked * 100) if staked else 0.0,
+        "yield": (profit / staked * 100) if staked else 0.0,
+        "hit": (wins / len(settled) * 100) if settled else 0.0,
+        "n": len(bets), "settled": len(settled),
+        "pending": sum(1 for b in bets if b["Estado"] == "Pendiente"),
     }
 
 
@@ -602,48 +422,41 @@ def bankroll_kpis() -> Dict[str, float]:
 def kpi_card(col, label: str, value: str, sub: str = "", cls: str = "") -> None:
     col.markdown(
         f"<div class='kpi'><div class='lbl'>{label}</div>"
-        f"<div class='val {cls}'>{value}</div>"
-        f"<div class='sub'>{sub}</div></div>",
+        f"<div class='val {cls}'>{value}</div><div class='sub'>{sub}</div></div>",
         unsafe_allow_html=True,
     )
 
 
-def render_header() -> None:
-    """Logo + bienvenida personalizada + barra de KPIs financieras."""
+def render_header(bankroll: float, cur: str) -> None:
+    """Logo + bienvenida + KPIs (derivados del tracker del usuario)."""
     st.markdown(
-        "<div class='brand'>"
-        "<span class='mark'>🎯</span>"
-        "<span class='name'>APEXPREDICT IA</span>"
-        "<span class='tag'>| Inteligencia Deportiva</span>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+        "<div class='brand'><span class='mark'>🛰️</span>"
+        "<span class='name'>APEXPREDICT MULTI-ENGINE & TRACKER</span>"
+        "<span class='tag'>| Quant Sports IA</span></div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='welcome'>Bienvenido de nuevo, <b>{ANALYST_NAME}</b>. "
-        f"Tu panel está sincronizado — motor de inferencia Poisson listo. "
-        f"Rigor científico sobre datos verificados.</div>",
-        unsafe_allow_html=True,
-    )
+        f"Motor multi-torneo · comparador de 4 casas · optimización de stake "
+        f"(Kelly) · moneda base <b>{cur}</b>.</div>", unsafe_allow_html=True)
 
-    k = bankroll_kpis()
-    up = "up" if k["profit"] >= 0 else "down"
-    arrow = "▲" if k["profit"] >= 0 else "▼"
+    k = tracker_kpis(st.session_state.get("bets", []))
+    balance = bankroll + k["profit"]
+    pos = k["profit"] >= 0
+    cls = "neon" if pos else "coral"
+    arrow = "▲" if pos else "▼"
     cols = st.columns(4)
-    kpi_card(cols[0], "Banca actual (Bankroll)", f"${k['bankroll']:,.0f}",
-             f"{arrow} {k['profit']:+,.0f} vs. inicial", up)
-    kpi_card(cols[1], "ROI acumulado (mes)", f"{k['roi']:+.1f}%",
-             f"{k['n_bets']} apuestas liquidadas", up)
-    kpi_card(cols[2], "Yield actual", f"{k['yield']:+.1f}%",
-             "beneficio / importe apostado", up)
-    kpi_card(cols[3], "Tasa de acierto", f"{k['hit_rate']:.0f}%",
-             "efectividad histórica", "")
+    kpi_card(cols[0], "Balance (Banca + P&L)", money(balance, cur),
+             f"{arrow} {money(k['profit'], cur)} P&L", cls if k["settled"] else "")
+    kpi_card(cols[1], "ROI acumulado", f"{k['roi']:+.1f}%", f"{k['settled']} liquidadas",
+             cls if k["settled"] else "")
+    kpi_card(cols[2], "Yield actual", f"{k['yield']:+.1f}%", "beneficio / stake",
+             cls if k["settled"] else "")
+    kpi_card(cols[3], "Apuestas en tracker", f"{k['n']}", f"{k['pending']} pendientes", "")
 
 
 def render_prob_bar(mk: Dict[str, float], home: str, away: str) -> None:
     h, d, a = mk["1"], mk["X"], mk["2"]
-    hf, af = TEAM_DB[home]["flag"], TEAM_DB[away]["flag"]
-    st.markdown(
-        f"""
+    hb, ab = ALL_TEAMS[home]["badge"], ALL_TEAMS[away]["badge"]
+    st.markdown(f"""
         <div class='bar'>
           <div class='seg' style='width:{h*100:.1f}%;background:{C['accent']}'>{h:.0%}</div>
           <div class='seg' style='width:{d*100:.1f}%;background:{C['muted']}'>{d:.0%}</div>
@@ -651,17 +464,12 @@ def render_prob_bar(mk: Dict[str, float], home: str, away: str) -> None:
         </div>
         <div style='display:flex;justify-content:space-between;margin-top:.35rem;
                     font-size:.82rem;color:{C['muted']}'>
-          <span>{hf} {home} (victoria)</span><span>Empate</span>
-          <span>{away} {af} (victoria)</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+          <span>{hb} {home}</span><span>Empate</span><span>{away} {ab}</span>
+        </div>""", unsafe_allow_html=True)
 
 
 def render_dofa(dofa: Dict[str, List[str]]) -> None:
-    cls = {"Fortalezas": "cf", "Debilidades": "cd",
-           "Oportunidades": "co", "Amenazas": "ca"}
+    cls = {"Fortalezas": "cf", "Debilidades": "cd", "Oportunidades": "co", "Amenazas": "ca"}
     cols = st.columns(4)
     for col, (dim, items) in zip(cols, dofa.items()):
         html = f"<div class='card'><span class='chip {cls[dim]}'>{dim.upper()}</span>"
@@ -671,55 +479,33 @@ def render_dofa(dofa: Dict[str, List[str]]) -> None:
             html += "</ul>"
         else:
             html += "<p class='muted'>Sin señales relevantes en esta muestra.</p>"
-        html += "</div>"
-        col.markdown(html, unsafe_allow_html=True)
+        col.markdown(html + "</div>", unsafe_allow_html=True)
 
 
-def style_singles(df: pd.DataFrame):
-    """Formatea la tabla de sencillas y resalta en verde las de valor (EV>0)."""
-    def _hl(row):
-        color = f"background-color: rgba(32,201,151,.14)" if row["EV"] > 0 else ""
-        return [color] * len(row)
-    return (df.style
-            .apply(_hl, axis=1)
-            .format({"Prob. IA": "{:.1%}", "Prob. casa": "{:.1%}",
-                     "Cuota (casa)": "{:.2f}", "EV": "{:+.2f}"}))
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# PESTAÑAS
-# ══════════════════════════════════════════════════════════════════════════
-def tab_prediccion(home, away, modality, n, pred, dofa) -> None:
-    hf, af = TEAM_DB[home]["flag"], TEAM_DB[away]["flag"]
+# ---------------- Pestaña: Inferencia & DOFA ----------------
+def tab_inferencia(home, away, tournament, n, pred, dofa) -> None:
+    hb, ab = ALL_TEAMS[home]["badge"], ALL_TEAMS[away]["badge"]
     score, sp = pred.top_scores[0]
-
-    st.markdown(f"#### {hf} {home}  vs  {away} {af}  ·  _{modality}_  ·  "
-                f"muestra: últimos {n} partidos")
-
+    st.markdown(f"#### {hb} {home}  vs  {away} {ab}  ·  _{tournament}_  ·  muestra: últimos {n} pp")
     c = st.columns(5)
-    kpi_card(c[0], "Marcador proyectado", score, f"prob. {sp:.1%}", "up")
+    kpi_card(c[0], "Marcador proyectado", score, f"prob. {sp:.1%}", "neon")
     kpi_card(c[1], "Victoria local", f"{pred.markets['1']:.0%}", home)
     kpi_card(c[2], "Empate", f"{pred.markets['X']:.0%}", "resultado X")
     kpi_card(c[3], "Victoria visitante", f"{pred.markets['2']:.0%}", away)
-    kpi_card(c[4], "Goles esperados (λ)", f"{pred.lam_home:.2f} – {pred.lam_away:.2f}",
-             "local – visita")
+    kpi_card(c[4], "Goles esperados (λ)", f"{pred.lam_home:.2f} – {pred.lam_away:.2f}", "local – visita")
 
-    st.markdown("<div class='card'><h4>Distribución del resultado (1X2)</h4>",
-                unsafe_allow_html=True)
+    st.markdown("<div class='card'><h4>Distribución 1X2</h4>", unsafe_allow_html=True)
     render_prob_bar(pred.markets, home, away)
     st.markdown("</div>", unsafe_allow_html=True)
 
     cA, cB = st.columns([1, 1])
     with cA:
-        st.markdown("<div class='card'><h4>🎯 Marcadores más probables</h4>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='card'><h4>🎯 Marcadores más probables</h4>", unsafe_allow_html=True)
         sdf = pd.DataFrame(pred.top_scores, columns=["Marcador", "Probabilidad"])
-        st.dataframe(sdf.style.format({"Probabilidad": "{:.1%}"}),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(sdf.style.format({"Probabilidad": "{:.1%}"}), use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
     with cB:
-        st.markdown("<div class='card'><h4>📈 Mercados de goles</h4>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='card'><h4>📈 Mercados de goles</h4>", unsafe_allow_html=True)
         g = st.columns(2)
         kpi_card(g[0], "Más de 2.5", f"{pred.markets['Over 2.5']:.0%}")
         kpi_card(g[1], "Menos de 2.5", f"{pred.markets['Under 2.5']:.0%}")
@@ -728,216 +514,216 @@ def tab_prediccion(home, away, modality, n, pred, dofa) -> None:
         kpi_card(g2[1], "Ambos anotan No", f"{pred.markets['BTTS No']:.0%}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("### 🧭 Matriz DOFA Cruzada (algorítmica)")
+    st.markdown("### 🧭 Matriz DOFA Cruzada (dinámica)")
     render_dofa(dofa)
 
 
-def tab_historial(home, away, n) -> None:
-    st.markdown(f"#### Inspección del historial · últimos {n} partidos "
-                f"(datos crudos y auditables)")
+# ---------------- Pestaña: Datos & Auditoría ----------------
+def tab_datos(home, away, n, source, custom_url) -> None:
+    st.markdown("#### 🔍 Datos crudos & Auditoría de origen")
+    active = custom_url.strip() if source == "Custom URL" else "plantilla oficial"
+    st.markdown(f"<span class='muted'>Origen: <b>{source}</b> · {active} · "
+                f"corrida {SCRAPE_DATE.strftime('%Y-%m-%d %H:%M')}.</span>", unsafe_allow_html=True)
     for team in (home, away):
-        flag = TEAM_DB[team]["flag"]
+        st.markdown(f"##### {ALL_TEAMS[team]['badge']} {team} — log de extracción")
+        st.dataframe(extraction_log(team, n, source, custom_url), use_container_width=True,
+                     hide_index=True,
+                     column_config={"URL de origen": st.column_config.LinkColumn("URL de origen")})
         df = last_n(team, n)
-        st.markdown(f"##### {flag} {team}")
         st.dataframe(df, use_container_width=True, hide_index=True)
-
         cc = st.columns(2)
         with cc[0]:
-            st.markdown("<span class='muted'>Tendencia de goles (GF vs GC)</span>",
-                        unsafe_allow_html=True)
-            st.line_chart(df.set_index("Jornada")[["GF", "GC"]], height=220)
+            st.markdown("<span class='muted'>Goles: a favor vs en contra</span>", unsafe_allow_html=True)
+            st.line_chart(df.set_index("Jornada")[["GF", "GC"]], height=190)
         with cc[1]:
-            st.markdown("<span class='muted'>Tiros: al arco vs concedidos</span>",
-                        unsafe_allow_html=True)
-            st.bar_chart(df.set_index("Jornada")[["Tiros arco", "Tiros concedidos"]],
-                         height=220)
+            st.markdown("<span class='muted'>Tiros al arco vs concedidos</span>", unsafe_allow_html=True)
+            st.bar_chart(df.set_index("Jornada")[["Tiros arco", "Tiros concedidos"]], height=190)
         st.markdown("---")
 
 
-def tab_jugadores(home, away, n) -> None:
-    st.markdown(f"#### Estadísticas por jugador · consistencia sobre {n} partidos")
-    st.markdown("<span class='muted'>La desviación estándar (σ) mide la "
-                "consistencia: menor σ = rendimiento más fiable y predecible. "
-                "El índice 0-100 traduce esa estabilidad.</span>",
-                unsafe_allow_html=True)
-    for team in (home, away):
-        flag = TEAM_DB[team]["flag"]
-        pc = player_consistency(team, n)
-        st.markdown(f"##### {flag} {team}")
-        def _hl_consist(row):
-            # Resalta al jugador más consistente técnicamente de cada equipo.
-            top = row["Consist. técnica"] == pc["Consist. técnica"].max()
-            return ["background-color: rgba(0,180,216,.14)" if top else ""] * len(row)
+# ---------------- Pestaña: Apuestas inteligentes (multi-casa + Kelly) --------
+def tab_apuestas(home, away, pred, consensus, risk, bankroll, cur, stake_pct) -> None:
+    st.markdown("#### 💸 Apuestas Inteligentes · Comparador Multi-Casa & Valor (EV)")
+    opts = market_options(home, away)
+    label = st.selectbox("Mercado a analizar", list(opts.keys()))
+    key, ref = opts[label]
+    prob_ia = pred.markets[key]
+    cons_p = consensus.markets[key]
+    fair_ia = 1.0 / max(prob_ia, 0.001)
 
-        st.dataframe(
-            pc.style.apply(_hl_consist, axis=1).format({
-                "Rating medio": "{:.2f}", "σ Rating": "{:.3f}",
-                "Consist. técnica": "{:.1f}", "Km medio": "{:.2f}",
-                "σ Km": "{:.3f}", "Consist. física": "{:.1f}",
-            }),
-            use_container_width=True, hide_index=True,
-        )
-        best = pc.loc[pc["Consist. técnica"].idxmax()]
-        st.caption(f"🧩 Jugador más consistente técnicamente: **{best['Jugador']}** "
-                   f"(σ rating {best['σ Rating']:.3f}).")
-        st.markdown("---")
+    # Explicación matemática transparente
+    st.info(f"**Cálculo transparente** · Probabilidad IA = **{prob_ia:.1%}**  →  "
+            f"Cuota Justa IA = 1 / Prob. IA = **{fair_ia:.2f}**.  "
+            f"Valor Esperado por casa: EV = (Prob. IA × Cuota) − 1.")
 
+    # Tabla de las 4 casas, mejor cuota resaltada
+    bt = bookmaker_table(prob_ia, cons_p, home, away, key)
+    best_i = bt["Cuota"].idxmax()
+    best = bt.loc[best_i]
 
-def tab_auditoria(home, away, modality, n, pred) -> None:
-    """
-    🔍 Confirma por cuenta propia — auditoría de origen y transparencia total.
-    Tres bloques: (1) log de extracción con URLs, (2) fórmulas del pipeline,
-    (3) checklist interactivo de verificación manual.
-    """
-    st.markdown("#### 🔍 Confirma por cuenta propia")
-    st.markdown("<span class='muted'>Transparencia radical: aquí puedes rastrear de "
-                "dónde salió cada dato, con qué fórmulas se procesó, y cotejarlo tú "
-                "mismo contra lo que viste en el partido. Cero cajas negras.</span>",
-                unsafe_allow_html=True)
+    def _hl(row):
+        is_best = row.name == best_i
+        bg = ("background-color: rgba(57,255,20,.18)" if is_best
+              else ("background-color: rgba(255,77,77,.10)" if row["EV"] <= 0 else ""))
+        return [bg] * len(row)
 
-    # ---------- BLOQUE 1: Origen de los datos (log de scraping) ----------
-    st.markdown("### 1 · Origen de los datos · Log de extracción")
-    st.markdown(f"<span class='muted'>Última corrida del scraper: "
-                f"<b>{SCRAPE_DATE.strftime('%Y-%m-%d %H:%M')}</b> · "
-                f"{n} partidos por equipo · fuentes: ESPN / Win Sports.</span>",
-                unsafe_allow_html=True)
-    for team in (home, away):
-        flag = TEAM_DB[team]["flag"]
-        log = extraction_log(team, n)
-        st.markdown(f"##### {flag} {team}")
-        st.dataframe(
-            log,
-            use_container_width=True, hide_index=True,
-            column_config={
-                "URL de origen": st.column_config.LinkColumn("URL de origen"),
-            },
-        )
-    st.caption("Las URLs y gameId son simulados y deterministas (demo educativa). "
-               "En producción apuntarían al recurso real raspado bajo su licencia/ToS.")
+    st.dataframe(
+        bt.style.apply(_hl, axis=1).format({"Cuota": "{:.2f}", "Prob. implícita": "{:.1%}", "EV": "{:+.2f}"}),
+        use_container_width=True, hide_index=True)
 
-    # ---------- BLOQUE 2: Transparencia algorítmica ----------
-    st.markdown("### 2 · Transparencia algorítmica · Del dato a la probabilidad")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("<div class='card'><h4>Paso A · xG desde los tiros al arco</h4>"
-                    "<p class='muted'>Cada remate a puerta vale, en promedio, una "
-                    "fracción de gol (conversión histórica). El xG del partido es la "
-                    "suma esperada:</p></div>", unsafe_allow_html=True)
-        st.latex(r"xG_{partido} = TirosAlArco \times " + f"{XG_PER_SOT}")
-        st.markdown("<div class='card'><h4>Paso B · Fuerzas de ataque y defensa</h4>"
-                    "<p class='muted'>Sobre la muestra de N partidos se promedian los "
-                    "goles a favor (ataque) y en contra (defensa):</p></div>",
-                    unsafe_allow_html=True)
-        st.latex(r"Atk = \frac{1}{N}\sum_{i=1}^{N} GF_i \qquad "
-                 r"Def = \frac{1}{N}\sum_{i=1}^{N} GC_i")
-    with c2:
-        st.markdown("<div class='card'><h4>Paso C · Goles esperados (λ)</h4>"
-                    "<p class='muted'>Se cruzan ataque propio y defensa rival, "
-                    "normalizados por la media de la liga, con ventaja local y factor "
-                    "de modalidad:</p></div>", unsafe_allow_html=True)
-        st.latex(r"\lambda_{local} = \frac{Atk_{L}\cdot Def_{V}}{\bar{G}_{liga}}"
-                 r"\cdot V_{local}\cdot M")
-        st.latex(r"\lambda_{visita} = \frac{Atk_{V}\cdot Def_{L}}{\bar{G}_{liga}}"
-                 r"\cdot M")
-        st.markdown("<div class='card'><h4>Paso D · Distribución de Poisson</h4>"
-                    "<p class='muted'>La probabilidad de un marcador exacto (i-j) es "
-                    "el producto de dos Poisson independientes:</p></div>",
-                    unsafe_allow_html=True)
-        st.latex(r"P(i,j) = \frac{\lambda_L^{i} e^{-\lambda_L}}{i!}\cdot"
-                 r"\frac{\lambda_V^{j} e^{-\lambda_V}}{j!}")
+    # Recomendación de compra + Kelly
+    ev_best = float(best["EV"])
+    monto_kelly = kelly_amount(ev_best, float(best["Cuota"]), bankroll, risk)
+    monto_cap = bankroll * (stake_pct / 100.0)
+    monto_final = min(monto_kelly, monto_cap) if monto_kelly > 0 else 0.0
 
-    # Cifras reales de ESTE partido, para que el usuario replique el cálculo.
-    h, a = team_averages(home, n), team_averages(away, n)
-    st.markdown("<div class='card'><h4>🔢 Verifica los números de este partido</h4>",
-                unsafe_allow_html=True)
-    audit = pd.DataFrame({
-        "Parámetro": ["Ataque (GF prom.)", "Defensa (GC prom.)",
-                      "Media de goles liga", "Ventaja local", "Factor modalidad",
-                      "λ resultante"],
-        home: [f"{h['gf']:.3f}", f"{h['ga']:.3f}", f"{LEAGUE_AVG:.3f}",
-               f"{HOME_ADV:.2f}", f"{MODALITIES[modality]:.2f}",
-               f"{pred.lam_home:.3f}"],
-        away: [f"{a['gf']:.3f}", f"{a['ga']:.3f}", f"{LEAGUE_AVG:.3f}",
-               "1.00 (visita)", f"{MODALITIES[modality]:.2f}",
-               f"{pred.lam_away:.3f}"],
-    })
-    st.dataframe(audit, use_container_width=True, hide_index=True)
-    st.caption(f"Comprobación λ local = {h['gf']:.3f} × {a['ga']:.3f} ÷ "
-               f"{LEAGUE_AVG:.3f} × {HOME_ADV:.2f} × {MODALITIES[modality]:.2f} = "
-               f"{pred.lam_home:.3f}  ✔")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ---------- BLOQUE 3: Verificación manual (checklist) ----------
-    st.markdown("### 3 · Verificación manual · Tu control de veracidad")
-    st.markdown("<span class='muted'>Marca la casilla si el dato coincide con lo que "
-                "tú viste en el partido. Tu tasa de coincidencia mide tu confianza en "
-                "la muestra.</span>", unsafe_allow_html=True)
-
-    team_v = st.selectbox("Equipo a verificar", [home, away], key="verify_team")
-    src = last_n(team_v, n)[["Jornada", "Rival", "GF", "GC", "Posesión %",
-                             "Tiros arco", "xG"]].copy()
-    src.insert(0, "✔ Coincide", True)   # por defecto, el usuario desmarca discrepancias
-    edited = st.data_editor(
-        src,
-        use_container_width=True, hide_index=True, key="verify_editor",
-        column_config={
-            "✔ Coincide": st.column_config.CheckboxColumn(
-                "✔ Coincide", help="Marca si el dato coincide con lo que observaste."),
-        },
-        disabled=["Jornada", "Rival", "GF", "GC", "Posesión %", "Tiros arco", "xG"],
-    )
-    ok = int(edited["✔ Coincide"].sum())
-    total = len(edited)
-    rate = ok / total * 100 if total else 0
-    cc = st.columns(3)
-    kpi_card(cc[0], "Datos verificados", f"{ok}/{total}", "casillas marcadas")
-    kpi_card(cc[1], "Coincidencia", f"{rate:.0f}%",
-             "veracidad percibida", "up" if rate >= 80 else "down")
-    kpi_card(cc[2], "Muestra auditada", f"{team_v}", f"últimos {n} partidos")
-    if rate == 100:
-        st.success("✅ Muestra 100% verificada por ti. Máxima confianza en la predicción.")
-    elif rate >= 60:
-        st.info(f"🟡 {rate:.0f}% verificado. Revisa las jornadas con discrepancias antes de apostar.")
+    if ev_best > 0 and monto_final > 0:
+        ganancia = monto_final * (best["Cuota"] - 1)
+        st.markdown(
+            f"<div class='best'>✅ <b>Recomendación de compra</b><br>"
+            f"Apuesta a <b>{ref}</b> en <b>{best['Casa']}</b> "
+            f"(mejor cuota: <b>{best['Cuota']:.2f}</b>) · EV <span class='neon'>{ev_best:+.2f}</span><br>"
+            f"Monto óptimo (Kelly {risk}): <b class='neon'>{money(monto_final, cur)}</b> "
+            f"→ ganancia potencial <b>{money(ganancia, cur)}</b>.<br>"
+            f"<span class='muted'>Kelly puro sugiere {money(monto_kelly, cur)}; limitado a tu stake "
+            f"máx. {stake_pct:.1f}% = {money(monto_cap, cur)}.</span></div>",
+            unsafe_allow_html=True)
+        st.caption(f"Kelly: Monto = Bankroll {money(bankroll, cur)} × (EV {ev_best:+.2f} / "
+                   f"(Cuota {best['Cuota']:.2f} − 1)) × Factor {RISK_KELLY[risk]:.2f} "
+                   f"({risk}) = {money(monto_kelly, cur)}.")
     else:
-        st.warning("🔴 Baja coincidencia: los datos no cuadran con tu observación. "
-                   "Trata la predicción con cautela.")
+        st.warning(f"❌ Ninguna casa ofrece valor (EV>0) para «{label}» con la muestra actual. "
+                   f"La mejor cuota es {best['Cuota']:.2f} en {best['Casa']}, pero no supera la "
+                   f"Cuota Justa IA ({fair_ia:.2f}). No se recomienda apostar.")
 
 
-def render_bets(home, away, pred, consensus) -> None:
-    st.markdown("### 💸 Apuestas Inteligentes · Valor Esperado (EV)")
-    st.markdown("<span class='muted'>La casa cotiza sobre el consenso de 10 "
-                "partidos; tu modelo usa la ventana seleccionada. El desajuste "
-                "es tu ventaja: <b>EV = (Prob. IA × Cuota) − 1</b>.</span>",
+# ══════════════════════════════════════════════════════════════════════════
+# PANTALLA A — Panel de Análisis Predictivo
+# ══════════════════════════════════════════════════════════════════════════
+def screen_analisis(cfg) -> None:
+    # Botón de retroceso / reset
+    cols = st.columns([1, 3])
+    if cols[0].button("↩️ Volver / Configurar Nuevo Análisis"):
+        st.session_state.ready = False
+        st.rerun()
+
+    if not st.session_state.get("ready"):
+        st.markdown(
+            "<div class='card'><h4>👋 Configura tu análisis</h4><p>Elige en la barra "
+            "lateral el motor de datos, torneo y equipos, la muestra y tu perfil de "
+            "apuestas. Pulsa <b>Ejecutar Inferencia de IA</b> para desplegar la "
+            "predicción, la auditoría de datos y el comparador de casas.</p></div>",
+            unsafe_allow_html=True)
+        return
+
+    home, away = cfg["home"], cfg["away"]
+    n, comp = cfg["n"], cfg["comp"]
+    pred = compute_prediction(home, away, n, comp)
+    consensus = compute_prediction(home, away, 10, comp)
+    dofa = build_dofa(home, away, n, pred)
+
+    t1, t2, t3 = st.tabs(["🧠 Inferencia IA & DOFA", "🔍 Datos & Auditoría", "💸 Apuestas Inteligentes"])
+    with t1:
+        tab_inferencia(home, away, cfg["tournament"], n, pred, dofa)
+    with t2:
+        tab_datos(home, away, n, cfg["source"], cfg["custom_url"])
+    with t3:
+        tab_apuestas(home, away, pred, consensus, cfg["risk"], cfg["bankroll"],
+                     cfg["cur"], cfg["stake_pct"])
+
+    st.caption("⚠️ Herramienta educativa/analítica con datos simulados y deterministas. "
+               "Las apuestas implican riesgo financiero; ningún modelo garantiza resultados.")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PANTALLA B — Historial & Tracker de Apuestas
+# ══════════════════════════════════════════════════════════════════════════
+def screen_tracker(cur: str) -> None:
+    st.markdown("### 📒 Historial & Tracker de Apuestas Personal")
+    st.markdown("<span class='muted'>Registra manualmente tus jugadas. El historial se "
+                "guarda en la sesión del navegador. Utilidad y ROI se calculan solos.</span>",
                 unsafe_allow_html=True)
 
-    mode = st.radio("Tipo de apuesta", ["🎯 Sencillas", "🧩 Combinadas"],
-                    horizontal=True, label_visibility="collapsed")
+    if "bets" not in st.session_state:
+        st.session_state.bets = []
 
-    if mode == "🎯 Sencillas":
-        df = build_singles(pred, consensus)
-        st.dataframe(style_singles(df), use_container_width=True, hide_index=True)
-        val = df[df["EV"] > 0]
-        if len(val):
-            best = val.loc[val["EV"].idxmax()]
-            st.success(f"💎 Mejor valor: **{best['Mercado']}** — cuota "
-                       f"{best['Cuota (casa)']:.2f}, EV {best['EV']:+.2f} "
-                       f"(prob. IA {best['Prob. IA']:.0%}). {len(val)} apuesta(s) "
-                       f"con valor detectada(s).")
+    # ---- Formulario de alta ----
+    with st.form("bet_form", clear_on_submit=True):
+        st.markdown("#### ➕ Registrar nueva apuesta")
+        c1, c2, c3 = st.columns(3)
+        partido = c1.text_input("Equipos / Partido", value="",
+                                placeholder="Ej. Colombia vs Argentina")
+        tipo = c2.selectbox("Tipo de apuesta", ["Sencilla", "Combinada"])
+        seleccion = c3.text_input("Selección / Mercado", value="",
+                                  placeholder="Ej. Gana Colombia, Over 2.5")
+        c4, c5, c6 = st.columns(3)
+        cuota = c4.number_input("Cuota / Tasa", min_value=1.01, max_value=1000.0,
+                                value=2.00, step=0.01,
+                                help="⚖️ La cuota pactada con la casa. Ganancia = Inversión × Cuota.")
+        inversion = c5.number_input(f"Inversión ({CURRENCIES[cur]['sym']})", min_value=0.0,
+                                    value=float(CURRENCIES[cur]["default"]) * 0.01, step=1000.0 if cur == "COP" else 5.0,
+                                    help="🎯 Monto arriesgado en esta apuesta (tu stake).")
+        c7, c8 = st.columns(2)
+        estado = c7.selectbox("Estado", ["Pendiente", "Ganada", "Perdida"])
+        resultado = c8.text_input("Resultado real", value="", placeholder="Ej. 2-1")
+        submitted = st.form_submit_button("💾 Guardar apuesta")
+
+    if submitted:
+        if not partido.strip():
+            st.error("Indica al menos el partido/equipos.")
         else:
-            st.info("Sin apuestas con valor: tu muestra coincide con el consenso "
-                    "del mercado (no hay ventaja explotable). Prueba a estrechar el "
-                    "rango de partidos en el slider.")
-    else:
-        combos = build_combos(home, away, pred, consensus)
-        cdf = pd.DataFrame(combos)
-        st.dataframe(
-            cdf.style.format({"Cuota final": "{:.2f}", "Fiabilidad IA": "{:.1%}"}),
-            use_container_width=True, hide_index=True,
-        )
-        top = combos[0]
-        st.info(f"🏆 Combinada recomendada: **{top['Combinada']}** — cuota final "
-                f"**{top['Cuota final']:.2f}**, fiabilidad {top['Fiabilidad IA']:.0%}, "
-                f"riesgo {top['Riesgo']}.")
+            st.session_state.bets.append({
+                "Fecha": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                "Partido": partido.strip(), "Tipo": tipo,
+                "Selección": seleccion.strip() or "-", "Cuota": float(cuota),
+                "Inversión": float(inversion), "Estado": estado,
+                "Resultado": resultado.strip() or "-",
+            })
+            st.success(f"Apuesta registrada: {partido.strip()} @ {cuota:.2f}")
+
+    bets = st.session_state.bets
+
+    # ---- Cuadro de mando ----
+    k = tracker_kpis(bets)
+    st.markdown("#### 📊 Cuadro de mando financiero")
+    m = st.columns(5)
+    pcls = "neon" if k["profit"] >= 0 else "coral"
+    kpi_card(m[0], "Balance neto", money(k["profit"], cur),
+             "utilidad acumulada", pcls if k["settled"] else "")
+    kpi_card(m[1], "Importe apostado", money(k["staked"], cur), f"{k['settled']} liquidadas")
+    kpi_card(m[2], "ROI", f"{k['roi']:+.1f}%", "retorno / inversión", pcls if k["settled"] else "")
+    kpi_card(m[3], "Yield", f"{k['yield']:+.1f}%", "beneficio / stake", pcls if k["settled"] else "")
+    kpi_card(m[4], "Tasa de acierto", f"{k['hit']:.0f}%", f"{k['pending']} pendientes")
+
+    # ---- Tabla del historial ----
+    st.markdown("#### 🗂️ Registro histórico de jugadas")
+    if not bets:
+        st.info("Aún no hay apuestas. Registra la primera con el formulario de arriba.")
+        return
+
+    df = pd.DataFrame(bets)
+    df["Ganancia si acierta"] = df["Inversión"] * df["Cuota"]
+    df["Utilidad neta"] = [bet_net(e, i, c) for e, i, c in
+                           zip(df["Estado"], df["Inversión"], df["Cuota"])]
+    df = df.iloc[::-1].reset_index(drop=True)          # más recientes arriba
+
+    def _hl_row(row):
+        color = {"Ganada": "rgba(57,255,20,.14)", "Perdida": "rgba(255,77,77,.14)"}.get(row["Estado"], "")
+        return [f"background-color: {color}" if color else ""] * len(row)
+
+    st.dataframe(
+        df.style.apply(_hl_row, axis=1).format({
+            "Cuota": "{:.2f}", "Inversión": lambda v: money(v, cur),
+            "Ganancia si acierta": lambda v: money(v, cur),
+            "Utilidad neta": lambda v: money(v, cur)}),
+        use_container_width=True, hide_index=True)
+
+    cc = st.columns([1, 1, 3])
+    if cc[0].button("🗑️ Limpiar historial"):
+        st.session_state.bets = []
+        st.rerun()
+    csv = df.to_csv(index=False).encode("utf-8")
+    cc[1].download_button("⬇️ Exportar CSV", csv, "historial_apuestas.csv", "text/csv")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -945,79 +731,82 @@ def render_bets(home, away, pred, consensus) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 def main() -> None:
     inject_css()
-    render_header()
 
     # ---------------- Sidebar ----------------
     with st.sidebar:
-        st.markdown("## ⚙️ Configuración de Inferencia")
-        teams = list(TEAM_DB.keys())
-        home = st.selectbox("🏠 Equipo Local", teams, index=0)
-        away = st.selectbox("✈️ Equipo Rival",
-                            [t for t in teams if t != home], index=0)
-        modality = st.selectbox("🏆 Modalidad del Partido",
-                                list(MODALITIES.keys()), index=2)
-        st.caption(f"Factor de goles ×{MODALITIES[modality]:.2f} — "
-                   f"{'ofensivo' if MODALITIES[modality] > 1 else 'conservador'}")
+        st.markdown("## 🛰️ Panel de Control")
 
-        st.markdown("### 🔬 Control de Veracidad")
-        n = st.slider("Rango de partidos a analizar (N)", min_value=3,
-                      max_value=10, value=5,
-                      help="Granularidad de la muestra histórica. El backend "
-                           "recalcula todo dinámicamente con estos N partidos.")
-        st.caption(f"Analizando los últimos **{n}** de 10 partidos oficiales.")
+        screen = st.radio("Navegación", ["📊 Panel de Análisis", "📒 Historial & Tracker"],
+                          label_visibility="collapsed")
+
+        with st.expander("🌎 Moneda base", expanded=True):
+            cur = st.selectbox("Moneda de trabajo", ["COP", "USD"],
+                               help="Adapta todos los símbolos ($ o COP$) de la interfaz.")
+
+        with st.expander("🔌 A · Motor de Datos (Sourcing)", expanded=False):
+            source = st.selectbox("Origen primario",
+                                  ["ESPN Scraper", "Win Sports Analytica", "Custom URL"])
+            custom_url = st.text_input("URL personalizada", value="https://www.espn.com/soccer/",
+                                       help="Pega la URL que la IA 'leerá'. Se refleja en el log.",
+                                       disabled=(source != "Custom URL"))
+
+        with st.expander("🏆 B · Competición y Equipos", expanded=True):
+            tournament = st.selectbox("Torneo", list(CATALOG.keys()))
+            teams = list(CATALOG[tournament]["teams"].keys())
+            home = st.selectbox("🏠 Equipo Local", teams, index=0)
+            away = st.selectbox("✈️ Equipo Rival", [t for t in teams if t != home], index=0)
+            n = st.slider("Muestra (últimos N partidos)", 3, 10, 5,
+                          help="El backend recalcula todo con estos N partidos.")
+
+        cparams = CURRENCIES[cur]
+        with st.expander("💰 C · Perfil de Apuestas", expanded=True):
+            bankroll = st.slider(f"💰 Bankroll ({cparams['sym']})", cparams["min"], cparams["max"],
+                                 cparams["default"], step=cparams["step"],
+                                 help="💰 Bankroll: capital total destinado exclusivamente a apostar.")
+            stake_pct = st.slider("🎯 Stake máximo (% del Bankroll)", 0.5, 10.0, 2.0, 0.5,
+                                  help="🎯 Stake: % del Bankroll que arriesgas por apuesta "
+                                       "(Stake 1 = 1% del capital).")
+            risk = st.select_slider("⚖️ Aversión al Riesgo",
+                                    ["Conservador", "Moderado", "Agresivo"], value="Moderado",
+                                    help="⚖️ Ajusta la agresividad de la sugerencia de stake (Kelly).")
+
+        with st.expander("📖 Diccionario financiero", expanded=False):
+            st.markdown(
+                "- **💰 Bankroll:** todo tu capital destinado a apostar.\n"
+                "- **🎯 Stake:** % del Bankroll arriesgado por apuesta (Stake 1 = 1%).\n"
+                "- **⚖️ Aversión al Riesgo:** perfil (Conservador/Moderado/Agresivo) que "
+                "escala el Criterio de Kelly.\n"
+                "- **📈 EV (Valor Esperado):** (Prob. IA × Cuota) − 1. Si es >0, hay valor.\n"
+                "- **🧮 Kelly:** fracción óptima del capital a apostar según la ventaja.\n"
+                "- **📊 ROI / Yield:** utilidad ÷ importe apostado (rentabilidad).")
 
         st.markdown("---")
         run = st.button("🚀 Ejecutar Inferencia de IA")
+        comp = CATALOG[tournament]["comp"]
+        st.caption(f"Competitividad de liga ×{comp:.2f} "
+                   f"({'abierta' if comp > 1 else 'cerrada/defensiva'}).")
 
-        st.markdown("---")
-        st.markdown("#### Perfiles tácticos (muestra actual)")
-        for t in (home, away):
-            av = team_averages(t, n)
-            st.markdown(f"**{TEAM_DB[t]['flag']} {t}** · DT: {av['form']}")
-            st.caption(f"GF {av['gf']:.1f} · GC {av['ga']:.1f} · "
-                       f"Pos {av['pos']:.0f}% · Pases {av['pas']:.0f}%")
+    # ---------------- Header ----------------
+    render_header(bankroll, cur)
 
-    # ---------------- Estado ----------------
+    # ---------------- Estado + routing ----------------
     if run:
         st.session_state.ready = True
-        st.session_state.cfg = (home, away, modality, n)
+        st.session_state.cfg = dict(home=home, away=away, tournament=tournament, n=n,
+                                    comp=comp, source=source, custom_url=custom_url,
+                                    risk=risk, bankroll=bankroll, cur=cur, stake_pct=stake_pct)
 
-    if not st.session_state.get("ready"):
-        st.markdown(
-            "<div class='card'><h4>👋 Panel listo</h4>"
-            "<p>Configura Local, Rival, Modalidad y el <b>Rango de partidos</b> en "
-            "el panel lateral, y pulsa <b>Ejecutar Inferencia de IA</b>. El motor "
-            "Poisson calculará la predicción, la matriz DOFA, el historial auditable "
-            "y las oportunidades de valor.</p></div>",
-            unsafe_allow_html=True,
-        )
+    if screen == "📒 Historial & Tracker":
+        screen_tracker(cur)
         return
 
-    home, away, modality, n = st.session_state.cfg
-    pred = compute_prediction(home, away, modality, n)
-    consensus = compute_prediction(home, away, modality, 10)  # cuotas de la casa
-    dofa = build_dofa(home, away, n, pred)
-
-    t1, t2, t3, t4 = st.tabs([
-        "🧠 Predicción IA & DOFA",
-        "🔍 Historial (Data Cruda)",
-        "👤 Jugadores (Consistencia)",
-        "🔍 Confirma por cuenta propia",
-    ])
-    with t1:
-        tab_prediccion(home, away, modality, n, pred, dofa)
-        st.markdown("---")
-        render_bets(home, away, pred, consensus)
-    with t2:
-        tab_historial(home, away, n)
-    with t3:
-        tab_jugadores(home, away, n)
-    with t4:
-        tab_auditoria(home, away, modality, n, pred)
-
-    st.caption("⚠️ ApexPredict IA es una herramienta educativa/analítica con datos "
-               "simulados y deterministas. Las apuestas implican riesgo financiero; "
-               "ningún modelo garantiza resultados.")
+    # Pantalla A: usa la última config ejecutada (o la actual del sidebar como fallback).
+    cfg = st.session_state.get("cfg", dict(
+        home=home, away=away, tournament=tournament, n=n, comp=comp, source=source,
+        custom_url=custom_url, risk=risk, bankroll=bankroll, cur=cur, stake_pct=stake_pct))
+    # Mantén moneda/banca/riesgo sincronizados aunque no se re-ejecute la inferencia.
+    cfg.update(cur=cur, bankroll=bankroll, risk=risk, stake_pct=stake_pct)
+    screen_analisis(cfg)
 
 
 if __name__ == "__main__":

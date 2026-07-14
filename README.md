@@ -1,11 +1,12 @@
 # RES-IA-PART-FUT
 ### Sistema de IA para análisis, predicción y valoración de apuestas de fútbol
 
-Analiza los **últimos 5 partidos** de dos equipos (Local y Rival), aplica
+Analiza los **últimos N partidos** de dos equipos (Local y Rival), aplica
 *ingeniería inversa* sobre eventos y estadísticas para deducir patrones tácticos
 del DT y estado de los jugadores, genera una **matriz DOFA cruzada**, predice el
 resultado con **Poisson/Dixon-Coles**, detecta **value bets** frente a las cuotas
-del mercado y lleva un **P&L** con ROI/Yield.
+del mercado y lleva un **P&L** con ROI/Yield. Incluye una app web premium
+(**ApexPredict Multi-Engine IA**, `app.py`).
 
 > ⚠️ **Uso responsable.** Herramienta educativa/analítica. El scraping debe
 > respetar los Términos de Servicio y `robots.txt` de cada sitio; para producción
@@ -17,27 +18,27 @@ del mercado y lleva un **P&L** con ROI/Yield.
 ## 1. Arquitectura
 
 ```
-                 ┌────────────────────────────────────────────────┐
-                 │                    main.py                       │
-                 │                (orquestador)                     │
-                 └───────┬───────────────┬───────────────┬─────────┘
-                         │               │               │
-        ┌────────────────▼───┐   ┌───────▼────────┐   ┌──▼──────────────┐
-        │  1. INGESTIÓN ETL  │   │  2. PIPELINE   │   │  5. PREDICCIÓN  │
-        │  src/ingestion     │   │  src/pipeline  │   │  src/prediction │
-        │  · scraper.py      │──▶│  6 puntos →    │──▶│  · poisson      │
-        │  · odds_scraper.py │   │  TeamReport    │   │  · ml_model     │
-        │  · synthetic.py    │   └───────┬────────┘   │  · value_bets   │
-        │  · schemas.py      │           │            └──┬──────────────┘
-        └────────────────────┘   ┌───────▼────────┐      │
-                                 │  3. DOFA CRUZ. │      │
-                                 │  src/dofa      │──────┘  (ajusta λ)
-                                 │  cross_swot.py │
-                                 └────────────────┘      ┌─────────────────┐
-                                                         │ 6. P&L / KPIs   │
-                                                         │ src/performance │
-                                                         │ pnl.py (SQLite) │
-                                                         └─────────────────┘
+                 +------------------------------------------------+
+                 |                    main.py                     |
+                 |                (orquestador)                   |
+                 +------+----------------+----------------+-------+
+                        |                |                |
+        +---------------v----+   +-------v--------+   +---v-------------+
+        |  1. INGESTION ETL  |   |  2. PIPELINE   |   |  5. PREDICCION  |
+        |  src/ingestion     |   |  src/pipeline  |   |  src/prediction |
+        |  - scraper.py      |-->|  6 puntos ->   |-->|  - poisson      |
+        |  - odds_scraper.py |   |  TeamReport    |   |  - ml_model     |
+        |  - synthetic.py    |   +-------+--------+   |  - value_bets   |
+        |  - schemas.py      |           |            +---+-------------+
+        +--------------------+   +-------v--------+       |
+                                 |  3. DOFA CRUZ. |       |
+                                 |  src/dofa      |-------+  (ajusta lambda)
+                                 |  cross_swot.py |
+                                 +----------------+       +-----------------+
+                                                          | 6. P&L / KPIs   |
+                                                          | src/performance |
+                                                          | pnl.py (SQLite) |
+                                                          +-----------------+
 ```
 
 **Principio de diseño:** *adaptadores + contratos*. Todo el sistema habla el
@@ -53,16 +54,15 @@ testeable en aislamiento.
 Jerarquía canónica (`src/ingestion/schemas.py`):
 
 ```
-MatchData                    # 1 partido de 1 equipo
-├── team_stats: TeamMatchStats   # posesión, tiros, xG, ppda, línea, directness…
-└── players:   [PlayerMatchStats]  # rating, xG/xA, duelos, pases, avg_x/avg_y…
+MatchData                        # 1 partido de 1 equipo
+ |- team_stats: TeamMatchStats   # posesión, tiros, xG, ppda, línea, directness...
+ \- players:   [PlayerMatchStats]  # rating, xG/xA, duelos, pases, avg_x/avg_y...
 
-MarketOdds                   # cuotas 1X2 / Over-Under / BTTS
+MarketOdds                       # cuotas 1X2 / Over-Under / BTTS
 ```
 
-Un equipo = `List[MatchData]` (5 partidos). Se tabula a dos DataFrames:
-`team_df` (1 fila/partido) y `player_df` (1 fila/jugador-partido) en
-`pipeline/features.py`.
+Un equipo = `List[MatchData]`. Se tabula a dos DataFrames: `team_df`
+(1 fila/partido) y `player_df` (1 fila/jugador-partido) en `pipeline/features.py`.
 
 ---
 
@@ -100,9 +100,9 @@ motor de predicción, cerrando el bucle análisis → pronóstico.
 ## 5. Modelos matemáticos
 
 ### xG (expected goals)
-Probabilidad de que un remate termine en gol dado su contexto. Aquí se agrega por
+Probabilidad de que un remate termine en gol dado su contexto. Se agrega por
 equipo/jugador y se usa como **proxy de calidad de generación**, más estable que
-los goles reales (que tienen mucha varianza en 5 partidos).
+los goles reales (que tienen mucha varianza en pocas jornadas).
 
 ### Poisson bivariado + corrección Dixon-Coles (`prediction/poisson_model.py`)
 Fuerzas relativas a la media de liga:
@@ -115,26 +115,26 @@ defense_i = xG_against_i / media_liga
 Tasas esperadas del partido:
 
 ```
-λ_home = media_liga · attack_home · defense_away · ventaja_local · adj_home
-λ_away = media_liga · attack_away · defense_home                · adj_away
+lambda_home = media_liga * attack_home * defense_away * ventaja_local * adj_home
+lambda_away = media_liga * attack_away * defense_home                 * adj_away
 ```
 
 Probabilidad de marcador (x, y):
 
 ```
-P(x, y) = Pois(x; λ_home) · Pois(y; λ_away) · τ(x, y)
+P(x, y) = Pois(x; lambda_home) * Pois(y; lambda_away) * tau(x, y)
 ```
 
-`τ` (Dixon-Coles, ρ<0) corrige la subestimación de empates de pocos goles
+`tau` (Dixon-Coles, rho<0) corrige la subestimación de empates de pocos goles
 (0-0, 1-0, 0-1, 1-1). Sumando la malla de resultados se obtienen **1X2**,
 **Over/Under 2.5** y **BTTS**.
 
 ### Valor esperado y staking (`prediction/value_bets.py`)
 ```
 q     = 1 / cuota                     # prob. implícita (con margen de la casa)
-edge  = p_modelo − q
-EV    = p_modelo · cuota − 1          # >0 ⇒ value bet
-Kelly = (b·p − (1−p)) / b · fracción  # b = cuota − 1  (Kelly fraccionado)
+edge  = p_modelo - q
+EV    = p_modelo * cuota - 1          # >0  =>  value bet
+Kelly = (b*p - (1-p)) / b * fraccion  # b = cuota - 1  (Kelly fraccionado)
 ```
 
 ### KPIs de P&L (`performance/pnl.py`)
@@ -143,35 +143,99 @@ capital (bankroll).
 
 ---
 
-## 6. Cómo ejecutar
+## 6. Instalación y ejecución
 
-```bash
+### Requisitos previos
+- **Python 3.11 o superior** (probado en 3.13). Comprueba con `python --version`.
+- **pip** actualizado: `python -m pip install --upgrade pip`.
+- (Opcional) **Google Chrome** solo si activas el scraping con Selenium.
+
+### Instalación (recomendado: entorno virtual)
+
+**Windows (PowerShell):**
+```powershell
+cd "RES-IA-PART-FUT"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-python main.py          # corre en OFFLINE_MODE con datos sintéticos
 ```
 
+**macOS / Linux (bash):**
+```bash
+cd RES-IA-PART-FUT
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+> Mínimo solo para la **app web**: `pip install streamlit==1.40.0 pandas numpy scipy`
+
+### A) Ejecutar el pipeline backend (CLI)
+Flujo end-to-end (ETL → 6 puntos → DOFA → Poisson → value bets → P&L) con datos
+sintéticos, sin conexión:
+```bash
+python main.py
+```
 Para datos reales: en `config.py` pon `OFFLINE_MODE = False` (y `USE_SELENIUM`
-según el sitio), y ajusta URLs/selectores en `scraper.py` / `odds_scraper.py` a
-tu fuente **con licencia**.
+según el sitio) y ajusta URLs/selectores en `scraper.py` / `odds_scraper.py` a tu
+fuente **con licencia**.
+
+### B) Ejecutar la app web (ApexPredict Multi-Engine IA)
+```bash
+streamlit run app.py
+# Si 'streamlit' no está en el PATH:
+python -m streamlit run app.py
+```
+Se abre en `http://localhost:8501`. Configura torneo, equipos, origen de datos,
+muestra (slider) y perfil de apuestas en la barra lateral, y pulsa **Ejecutar
+Inferencia de IA**.
+
+### Solución de problemas (Windows)
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `ModuleNotFoundError: streamlit.proto` | Streamlit roto por **rutas largas** | `pip install "streamlit==1.40.0"` |
+| `'streamlit' no se reconoce...` | script fuera del `PATH` | usa `python -m streamlit run app.py` |
+| `UnicodeEncodeError` en consola | consola en cp1252 | `set PYTHONIOENCODING=utf-8` o usa la app web |
+| `background_gradient requires matplotlib` | falta matplotlib | ya evitado; si aparece, `pip install matplotlib` |
 
 ### Estructura de módulos
 ```
-config.py                    parámetros centrales (ventana, ligas, Kelly, rutas)
-main.py                      orquestador end-to-end
+config.py            parámetros centrales (ventana, ligas, Kelly, rutas)
+main.py              orquestador end-to-end (backend CLI)
+app.py               ApexPredict Multi-Engine IA (app web Streamlit)
+requirements.txt     dependencias
 src/
-├── ingestion/               ETL: scraping, cuotas, esquemas, sintético
-├── pipeline/                6 puntos → TeamReport
-├── dofa/                    matriz DOFA cruzada
-├── prediction/             poisson + ml + value bets
-└── performance/            P&L en SQLite + KPIs
+  ingestion/         ETL: scraping, cuotas, esquemas, sintético
+  pipeline/          6 puntos -> TeamReport
+  dofa/              matriz DOFA cruzada
+  prediction/        poisson + ml + value bets
+  performance/       P&L en SQLite + KPIs
 ```
 
 ---
 
-## 7. Roadmap sugerido
-- Calibrar `HOME_ADVANTAGE`, `LEAGUE_AVG_GOALS` y `ρ` con histórico real de la liga.
+## 7. App web: ApexPredict Multi-Engine IA (`app.py`)
+
+Interfaz empresarial en azul profundo con motor multi-torneo:
+
+- **Catálogo global**: Mundial 2026 (por confederaciones), Liga BetPlay, Champions
+  League y MLS / Otros. Los dropdowns de equipos se actualizan según el torneo.
+- **Data Sourcing configurable**: ESPN Scraper, Win Sports Analytica o **Custom URL**
+  (pega la URL que la IA "leerá"; se refleja en el log de extracción).
+- **Perfil de apuestas**: stake, bankroll y aversión al riesgo (Conservador /
+  Moderado / Agresivo) que filtra las recomendaciones.
+- **Poisson ajustado por competitividad de la liga** (`scipy.stats.poisson.pmf`).
+- **Pestañas de veracidad**: Inferencia & DOFA · Confirma por cuenta propia
+  (log de extracción + fórmulas + checklist) · Centro de Apuestas (sencillas/parlays).
+
+Ejecuta con `streamlit run app.py` (ver sección 6-B).
+
+---
+
+## 8. Roadmap sugerido
+- Calibrar `HOME_ADVANTAGE`, `LEAGUE_AVG_GOALS` y `rho` con histórico real de la liga.
 - Entrenar `OutcomeClassifier` (RandomForest) y hacer *ensemble* con Poisson.
-- Dashboard visual (Streamlit) sobre `BetLedger.equity_curve()`.
+- Conectar la app web al `BetLedger` real (SQLite) para P&L y curva de capital.
 - Backtesting: replay de temporadas para medir ROI del sistema antes de operar.
-#   X G o a l s - A I  
- 

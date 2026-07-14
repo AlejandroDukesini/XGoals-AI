@@ -69,33 +69,33 @@
   },
   "value_bets": [
     {
-      "market": "Over 2.5",
-      "model_prob": 0.743,
-      "book_odds": 1.73,
-      "implied_prob": 0.578,
-      "edge": 0.165,
-      "ev": 0.286,
-      "kelly_stake": 0.098,
+      "market": "2 (Visita)",
+      "model_prob": 0.378,
+      "book_odds": 4.1,
+      "implied_prob": 0.244,
+      "edge": 0.134,
+      "ev": 0.549,
+      "kelly_stake": 0.0443,
       "is_value": true
     },
     {
-      "market": "2 (Visita)",
-      "model_prob": 0.378,
-      "book_odds": 3.1,
-      "implied_prob": 0.323,
-      "edge": 0.055,
-      "ev": 0.171,
-      "kelly_stake": 0.0204,
+      "market": "Over 2.5",
+      "model_prob": 0.743,
+      "book_odds": 1.94,
+      "implied_prob": 0.515,
+      "edge": 0.228,
+      "ev": 0.442,
+      "kelly_stake": 0.1176,
       "is_value": true
     },
     {
       "market": "BTTS Sí",
       "model_prob": 0.74,
-      "book_odds": 1.58,
-      "implied_prob": 0.633,
-      "edge": 0.107,
-      "ev": 0.169,
-      "kelly_stake": 0.0728,
+      "book_odds": 1.64,
+      "implied_prob": 0.61,
+      "edge": 0.13,
+      "ev": 0.213,
+      "kelly_stake": 0.0833,
       "is_value": true
     }
   ]
